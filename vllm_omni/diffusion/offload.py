@@ -139,6 +139,7 @@ class LayerwiseOffloader:
         self.n = len(self.blocks)
 
         self.copy_stream = torch.cuda.Stream()
+        self.copy_stream_ctx = torch.cuda.stream(self.copy_stream)
 
         # Per-layer synchronization primitive: set after H2D copy completes.
         self._prefetch_done: list[torch.cuda.Event | None] = [None] * self.n
@@ -147,20 +148,48 @@ class LayerwiseOffloader:
         self._resident: list[bool] = [False] * self.n
         self._inflight: list[bool] = [False] * self.n
 
+        # Pre-allocate gpu tensors
+        # NOTE: Assume identical structure for each block
+        param_spec = {name: (t.shape, t.dtype) for name, t in dict(self.blocks[0].named_parameters()).items()}
+        buf_spec = {name: (t.shape, t.dtype) for name, t in dict(self.blocks[0].named_buffers()).items()}
+        for k, v in param_spec.items():
+            logger.info(f" >>> param : {k}: {v}")
+        for k, v in buf_spec.items():
+            logger.info(f" >>> buffer: {k}: {v}")
+
         # layer-id -> {name -> weight}
+        # self.layer_weights: dict[int, dict[str, torch.Tensor]] = {}
         self.layer_weights: dict[int, dict[str, torch.Tensor]] = {}
+        self.cpu_param_weights: dict[int, dict[str, torch.Tensor]] = {}
+        self.cpu_buffer_weights: dict[int, dict[str, torch.Tensor]] = {}
+        self.block_parameters: dict[int, dict[str, nn.Parameter]] = {}
+        self.block_buffers: dict[int, dict[str, torch.Tensor]] = {}
         for idx, block in enumerate(self.blocks):
-            self.layer_weights[idx] = self._to_cpu(block)
+            self.block_parameters[idx] = dict(block.named_parameters())
+            self.block_buffers[idx] = dict(block.named_buffers())
+
+            self.layer_weights[idx] = self._to_cpu(idx)
+            # self.cpu_param_weights[idx], self.cpu_buffer_weights[idx] = self._to_cpu(idx)
+
+        torch.cuda.empty_cache()
+
+        # self.gpu_block_parameters: dict[str, torch.Tensor] = {
+        #     name: torch.empty(shape, device=self.device, dtype=dtype) for name, (shape, dtype) in param_spec.items()
+        # }
+        # self.gpu_block_buffers: dict[str, torch.Tensor] = {
+        #     name: torch.empty(shape, device=self.device, dtype=dtype) for name, (shape, dtype) in buf_spec.items()
+        # }
 
         self.register_pre_block_hook()
         self.register_post_block_hook()
 
         self.prefetch_layer(0, non_blocking=False)
 
-    def _to_cpu(self, block: nn.Module) -> dict[str, torch.Tensor]:
+    # def _to_cpu(self, block: nn.Module) -> dict[str, torch.Tensor]:
+    def _to_cpu(self, layer_id: int) -> dict[str, torch.Tensor]:
         cpu_tensors = {}
 
-        for name, param in block.named_parameters():
+        for name, param in self.block_parameters[layer_id].items():
             cpu_param = param.detach().to("cpu")
             if self.pin_memory:
                 cpu_param = cpu_param.pin_memory()
@@ -168,7 +197,7 @@ class LayerwiseOffloader:
             param.data = torch.empty((), device=self.device, dtype=param.dtype)
             # param.data = torch.empty_like(param.data, device="meta")
 
-        for name, buf in block.named_buffers():
+        for name, buf in self.block_buffers[layer_id].items():
             cpu_buf = buf.detach().to("cpu")
             if self.pin_memory:
                 cpu_buf = cpu_buf.pin_memory()
@@ -208,15 +237,16 @@ class LayerwiseOffloader:
         """Called on compute stream right before layer executes."""
         if self._resident[layer_id]:
             evt = self._prefetch_done[layer_id]
+            # If event is None, then the layer is already resident, no wait needed
             if evt is not None:
-                torch.cuda.current_stream(device=self.device).wait_event(evt)
+                torch.cuda.current_stream().wait_event(evt)
             return
 
         # If not resident, schedule immediate prefetch and wait for it (JIT fix)
         self.prefetch_layer(layer_id)
         evt = self._prefetch_done[layer_id]
         if evt is not None:
-            torch.cuda.current_stream(device=self.device).wait_event(evt)
+            torch.cuda.current_stream().wait_event(evt)
         self._resident[layer_id] = True
 
     @torch.compiler.disable
@@ -229,42 +259,46 @@ class LayerwiseOffloader:
             logger.error("Inconsistent block layers happened")
             return
 
-        self.copy_stream.wait_stream(torch.cuda.current_stream())
-
         end_layer_id = min(layer_id + self.num_gpu_layers, len(self.blocks))
 
-        with torch.cuda.stream(self.copy_stream):
-            for idx in range(layer_id, end_layer_id):
-                # logger.info(f" >>> Prefetching layer {idx}")
-                if self._resident[idx] or self._inflight[idx]:
-                    continue
+        # with torch.cuda.stream(self.copy_stream):
+        for idx in range(layer_id, end_layer_id):
+            if self._resident[idx] or self._inflight[idx]:
+                continue
 
-                self._inflight[idx] = True
+            self._inflight[idx] = True
 
-                block = self.blocks[idx]
-                block_named_parameters: dict[str, nn.Parameter] = dict(block.named_parameters())
-                block_named_buffers: dict[str, torch.Tensor] = dict(block.named_buffers())
+            # block = self.blocks[idx]
+            # block_named_parameters: dict[str, nn.Parameter] = dict(block.named_parameters())
+            # block_named_buffers: dict[str, torch.Tensor] = dict(block.named_buffers())
 
-                for name, cpu_t in self.layer_weights[idx].items():
-                    # logger.info(f" >>> Re-materializing {name} on device {self.device}")
-                    param_or_buf = (
-                        block_named_parameters[name] if name in block_named_parameters else block_named_buffers[name]
-                    )
+            evt = torch.cuda.Event()
 
-                    gpu_t = torch.empty_like(cpu_t, device=self.device)
+            for name, cpu_t in self.layer_weights[idx].items():
+                if name in self.block_parameters[layer_id]:
+                    param_or_buf = self.block_parameters[layer_id][name]
+                    # gpu_t = self.gpu_block_parameters[name]
+                elif name in self.block_buffers[layer_id]:
+                    param_or_buf = self.block_buffers[layer_id][name]
+                    # gpu_t = self.gpu_block_buffers[name]
+                else:
+                    raise ValueError("Param or buffer name not found")
+
+                gpu_t = torch.empty_like(cpu_t, device=self.device)
+
+                with self.copy_stream_ctx:
                     gpu_t.copy_(cpu_t, non_blocking=non_blocking)
-                    # with torch.cuda.stream(self.copy_stream):
-                    # self.blocks[idx].to(self.device, non_blocking=non_blocking)
-                    # gpu_weight.copy_(cpu_t, non_blocking=non_blocking)
+                # with torch.cuda.stream(self.copy_stream):
+                # self.blocks[idx].to(self.device, non_blocking=non_blocking)
+                # gpu_weight.copy_(cpu_t, non_blocking=non_blocking)
 
-                    param_or_buf.data = gpu_t
+                param_or_buf.data = gpu_t
 
-                evt = torch.cuda.Event()
-                evt.record(self.copy_stream)
-                self._prefetch_done[idx] = evt
+            evt.record(self.copy_stream)
+            self._prefetch_done[idx] = evt
 
-                self._inflight[idx] = False
-                self._resident[idx] = True
+            self._inflight[idx] = False
+            self._resident[idx] = True
 
     @torch.compiler.disable
     def offload_layer(self, layer_id: int) -> None:
@@ -273,16 +307,20 @@ class LayerwiseOffloader:
             logger.warning(f"Invalid layer id specified: {layer_id}")
             return
 
-        # logger.info(f" >>> Offloading layer {layer_id}")
-
-        block = self.blocks[layer_id]
+        # block = self.blocks[layer_id]
         # free GPU residency
-        for _, param in block.named_parameters():
+        num_params = 0
+        num_buffers = 0
+        # for _, param in block.named_parameters():
+        for _, param in self.block_parameters[layer_id].items():
             param.data = torch.empty((), device=self.device, dtype=param.dtype)
             # param.data = torch.empty_like(param.data, device="meta")
-        for _, buf in block.named_buffers():
+            num_params += 1
+        # for _, buf in block.named_buffers():
+        for _, buf in self.block_buffers[layer_id].items():
             buf.data = torch.empty((), device=self.device, dtype=buf.dtype)
             # buf.data = torch.empty_like(buf.data, device="meta")
+            num_buffers += 1
 
     def remove(self) -> None:
         """Remove all hooks."""

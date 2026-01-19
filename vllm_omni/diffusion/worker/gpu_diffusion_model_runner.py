@@ -106,7 +106,7 @@ class GPUDiffusionModelRunner:
         logger.info("Model runner: Model loaded successfully.")
 
         # Apply CPU offloading (DiT <-> encoders mutual exclusion)
-        if self.od_config.enable_cpu_offload:
+        if self.od_config.enable_cpu_offload or self.od_config.layerwise_offload_dit:
             for name in ["vae"]:
                 module = getattr(self.pipeline, name, None)
                 if module is None:
