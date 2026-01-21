@@ -77,7 +77,9 @@ class GPUDiffusionModelRunner:
             memory_pool_context_fn: Optional function that returns a context manager
                 for memory pool allocation (used for sleep mode).
         """
-        load_device = "cpu" if self.od_config.enable_cpu_offload else str(self.device)
+        load_device = (
+            "cpu" if self.od_config.enable_cpu_offload or self.od_config.layerwise_offload_dit else str(self.device)
+        )
 
         def get_memory_context():
             if memory_pool_context_fn is not None:
