@@ -107,6 +107,14 @@ def parse_args() -> argparse.Namespace:
         default=1,
         help="Number of GPUs used for tensor parallelism (TP) inside the DiT.",
     )
+    parser.add_argument(
+        "--enable-layerwise-offload",
+        action="store_true",
+        help="Enable layerwise (blockwise) offloading on DiT modules.",
+    )
+    parser.add_argument(
+        "--num-gpu-layers", type=int, default=1, help="Number of layers (blocks) to keep on GPU during generation."
+    )
     return parser.parse_args()
 
 
@@ -161,8 +169,8 @@ def main():
 
     omni = Omni(
         model=args.model,
-        layerwise_offload_dit=True,
-        enable_cpu_offload=False,
+        layerwise_offload_dit=args.enable_layerwise_offload,
+        layerwise_num_gpu_layers=args.num_gpu_layers,
         vae_use_slicing=vae_use_slicing,
         vae_use_tiling=vae_use_tiling,
         cache_backend=args.cache_backend,
@@ -203,13 +211,6 @@ def main():
     )
     generation_end = time.perf_counter()
     generation_time = generation_end - generation_start
-
-    # peak_bytes_alloc = torch.cuda.max_memory_allocated(device=0)
-    # peak_bytes_resv = torch.cuda.max_memory_reserved(device=0)
-    # peak_gb_alloc = peak_bytes_alloc / 1024**3
-    # peak_gb_resv = peak_bytes_resv / 1024**3
-    # print(f"Peak allocated GPU memory: {peak_gb_alloc:.2f} GB")
-    # print(f"Peak reserved GPU memory: {peak_gb_resv:.2f} GB")
 
     # Print profiling results
     print(f"Total generation time: {generation_time:.4f} seconds ({generation_time * 1000:.2f} ms)")
