@@ -135,17 +135,17 @@ class LayerwiseOffloader:
         self.device = device
         self.pin_memory = pin_memory
         self.num_gpu_layers = num_gpu_layers
+        self.num_blocks = len(self.blocks)
         self._pre_hook_handles: list = []
         self._post_hook_handles: list = []
-        self.n = len(self.blocks)
 
-        self.copy_stream = torch.cuda.Stream()
+        self._copy_stream = torch.cuda.Stream()
 
         # Per-layer synchronization primitive: set after H2D copy completes.
-        self._prefetch_done: list[torch.cuda.Event | None] = [None] * self.n
+        self._prefetch_done: list[torch.cuda.Event | None] = [None] * self.num_blocks
 
         # Simple state to avoid redundant work.
-        self._resident: list[bool] = [False] * self.n
+        self._resident: list[bool] = [False] * self.num_blocks
 
         # Pre-allocate gpu tensors
         # layer-id -> {dtype -> flattened aggregated cpu tensor}
@@ -164,12 +164,13 @@ class LayerwiseOffloader:
             self.layer_cpu_weights.append(dtype_cpu_flattened_weights)
             self.layer_metadata.append(dtype_metadata)
 
-        # for layer_idx in [0, 1, 2]:
-        #     for dtype, li in self.layer_metadata[layer_idx].items():
-        #         logger.info(f"Layer id {layer_idx} - dtype {dtype}")
-        #         for metadata in li:
-        #             logger.info(f"  >>> metadata {metadata}")
+        if self.num_blocks != len(self.layer_cpu_weights):
+            logger.error(
+                f"Inconsistent block layers happened: # of blocks: {self.num_blocks}; "
+                f"# of layer cpu weights: {len(self.layer_cpu_weights)}"
+            )
 
+        # Register pre and post forward hooks on each of the blocks
         self.register_block_hooks()
 
         # Pre-fetch the first layer
@@ -221,7 +222,7 @@ class LayerwiseOffloader:
     def register_block_hooks(self) -> None:
         def _pre_hook(module: nn.Module, args: tuple, *, layer_idx: int) -> None:
             # For the last block / layer, prefetch layer 0 (the first layer)
-            next_id = (layer_idx + 1) % self.n
+            next_id = (layer_idx + 1) % self.num_blocks
             self.prefetch_layer(next_id, non_blocking=True)
 
         def _post_hook(module: nn.Module, args: tuple, output: tuple, *, layer_idx: int) -> None:
@@ -241,20 +242,13 @@ class LayerwiseOffloader:
     @torch.compiler.disable
     def prefetch_layer(self, layer_idx: int, non_blocking: bool = True) -> None:
         # to gpu
-        if layer_idx >= len(self.blocks) or layer_idx < 0:
+        if layer_idx >= self.num_blocks or layer_idx < 0:
             logger.warning(f"Invalid layer id specified: {layer_idx}")
             return
-        if len(self.blocks) != len(self.layer_cpu_weights):
-            logger.error(
-                f"Inconsistent block layers happened: # of blocks: {len(self.blocks)}; "
-                f"# of layer cpu weights: {len(self.layer_cpu_weights)}"
-            )
-            return
 
-        self.copy_stream.wait_stream(torch.cuda.current_stream())
+        self._copy_stream.wait_stream(torch.cuda.current_stream())
 
-        num_blocks = len(self.blocks)
-        layers_to_fetch = [(layer_idx + i) % num_blocks for i in range(self.num_gpu_layers)]
+        layers_to_fetch = [(layer_idx + i) % self.num_blocks for i in range(self.num_gpu_layers)]
 
         for idx in layers_to_fetch:
             if self._resident[idx]:
@@ -266,13 +260,13 @@ class LayerwiseOffloader:
             evt = torch.cuda.Event()
             gpu_buffers: dict[torch.dtype, torch.Tensor] = {}
 
-            with torch.cuda.stream(self.copy_stream):
+            with torch.cuda.stream(self._copy_stream):
                 for dtype, cpu_weight in self.layer_cpu_weights[idx].items():
                     gpu_buffer = torch.empty(cpu_weight.shape, dtype=dtype, device=self.device)
                     gpu_buffer.copy_(cpu_weight, non_blocking=non_blocking)
                     gpu_buffers[dtype] = gpu_buffer
 
-                evt.record(self.copy_stream)
+                evt.record(self._copy_stream)
 
             for dtype in self.layer_metadata[idx]:
                 ordered_metadata: list[dict[str, Any]] = self.layer_metadata[idx][dtype]
@@ -295,7 +289,7 @@ class LayerwiseOffloader:
     @torch.compiler.disable
     def offload_layer(self, layer_idx: int) -> None:
         # to cpu
-        if layer_idx >= len(self.blocks) or layer_idx < 0:
+        if layer_idx >= self.num_blocks or layer_idx < 0:
             logger.warning(f"Invalid layer id specified: {layer_idx}")
             return
         if not self._resident[layer_idx]:
@@ -341,6 +335,7 @@ def apply_offload_hooks(
     """
     enable_cpu_offload = getattr(od_config, "enable_cpu_offload", False)
     layerwise_offload_dit = getattr(od_config, "layerwise_offload_dit", False)
+    pin_cpu_memory = getattr(od_config, "pin_cpu_memory", True)
 
     if not enable_cpu_offload and not layerwise_offload_dit:
         return
@@ -374,8 +369,6 @@ def apply_offload_hooks(
         except StopIteration:
             device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 
-    pin = getattr(od_config, "pin_cpu_memory", True)
-
     # Collect all encoders
     encoders: list[nn.Module] = []
     encoder_names: list[str] = []
@@ -394,29 +387,28 @@ def apply_offload_hooks(
             dit_mod.to("cpu")
         if torch.cuda.is_available():
             torch.cuda.empty_cache()
-        if pin and torch.cuda.is_available():
+        if pin_cpu_memory and torch.cuda.is_available():
             for dit_mod in dit_modules:
                 for p in dit_mod.parameters():
                     if p.data.device.type == "cpu" and not p.data.is_pinned():
                         p.data = p.data.pin_memory()
 
         # Register sequential offload hooks
-        SequentialOffloader(dit_modules, encoders, device, pin).register()
+        SequentialOffloader(dit_modules, encoders, device, pin_cpu_memory).register()
         logger.info(
             "CPU offload enabled: %s <-> %s (mutual exclusion)",
             ", ".join(dit_names),
             ", ".join(encoder_names),
         )
     elif layerwise_offload_dit:
-        # blocks = []
-        logger.info(f"Trying to applying offloading hooks on {dit_names}")
+        logger.info(f"Applying offloading hooks on {dit_names}")
+
         for dit_module in dit_modules:
             logger.info(f"Applying hook on {dit_module}")
             # HACK: hardcoded blocks attr name for testing
             # blocks_attr_name = "transformer_blocks"
             blocks_attr_name = "blocks"
             _blocks = getattr(dit_module, blocks_attr_name, None)
-            # blocks.extend(list(_blocks))
             blocks = list(_blocks)
 
             # move modules other than blocks to gpu and keep them on gpu
@@ -429,11 +421,8 @@ def apply_offload_hooks(
                 m.to(device)
                 logger.info(f"Moved {name} to device {device}")
 
-            for name, buf in dit_module.named_buffers():
-                logger.info(f" >>> named buffer {name}")
-
             # set to the module (transformer)
-            offloader = LayerwiseOffloader(blocks, device, pin, od_config.layerwise_num_gpu_layers)
+            offloader = LayerwiseOffloader(blocks, device, pin_cpu_memory, od_config.layerwise_num_gpu_layers)
             setattr(dit_module, "_layerwise_offloader", offloader)
 
             logger.info(

@@ -289,11 +289,9 @@ class OmniDiffusionConfig:
     enable_cpu_offload: bool = False
 
     # Layer-wise offloading (block-level offloading) parameters
-    # - Effective for DiT models
-    # - Only keeps a sliding window of layers on GPU at any time
     layerwise_offload_dit: bool = False
-    layerwise_num_gpu_layers: int = 2  # Number of transformer blocks to keep on GPU
-    layerwise_overlap_transfers: bool = True  # Overlap compute and memory transfers
+    # Number of transformer blocks to keep on GPU
+    layerwise_num_gpu_layers: int = 1
 
     use_fsdp_inference: bool = False
     pin_cpu_memory: bool = True  # Use pinned memory for faster transfers when offloading
