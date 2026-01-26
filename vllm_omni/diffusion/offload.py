@@ -122,6 +122,13 @@ class SequentialOffloader:
 
 
 class LayerwiseOffloader:
+    """Layer-wise CPU offloading for transformer blocks.
+
+    Keeps only a sliding window of layers (blocks), by default a single layer, on GPU,
+    prefetching the next block while the current block computes to approach compute - memcpy overlap.
+    Unused blocks are freed on GPU.
+    """
+
     def __init__(
         self,
         blocks: list[nn.Module],
@@ -129,7 +136,7 @@ class LayerwiseOffloader:
         pin_memory: bool = True,
         num_gpu_layers: int = 1,
     ):
-        assert all(isinstance(m, nn.Module) for m in blocks), "All transformer blocks must be nn.Module"
+        assert all(isinstance(m, nn.Module) for m in blocks), "All transformer blocks must be torch.nn.Module"
 
         self.blocks = blocks
         self.device = device
@@ -181,6 +188,16 @@ class LayerwiseOffloader:
     def _to_cpu(
         self, params: dict[str, nn.Parameter], bufs: dict[str, torch.Tensor]
     ) -> tuple[dict[torch.dtype, torch.Tensor], dict[torch.dtype, list[dict[str, Any]]]]:
+        """Move block parameters and buffers to CPU, flattening by dtype.
+
+        Consolidates parameters and buffers into contiguous CPU tensors grouped by dtype
+        for GPU transfers. Replaces original tensors with empty placeholders.
+
+        Returns:
+            Tuple of
+                flattened CPU tensors by dtype,
+                metadata for reconstruction by dtype
+        """
         dtype_grouped_weights: dict[torch.dtype, dict[str, torch.Tensor]] = {}
         dtype_cpu_flattened_weights: dict[torch.dtype, torch.Tensor] = {}
         # order does matter
@@ -220,6 +237,8 @@ class LayerwiseOffloader:
         return dtype_cpu_flattened_weights, dtype_metadata
 
     def register_block_hooks(self) -> None:
+        """Register forward hooks on blocks for prefetching and offloading."""
+
         def _pre_hook(module: nn.Module, args: tuple, *, layer_idx: int) -> None:
             # For the last block / layer, prefetch layer 0 (the first layer)
             next_id = (layer_idx + 1) % self.num_blocks
@@ -241,7 +260,11 @@ class LayerwiseOffloader:
 
     @torch.compiler.disable
     def prefetch_layer(self, layer_idx: int, non_blocking: bool = True) -> None:
-        # to gpu
+        """Copy layer weights from CPU -> GPU.
+
+        Pre-fetch target layer in an asynchronous way with compute - memory copy overlap,
+        with non_blocking set to True.
+        """
         if layer_idx >= self.num_blocks or layer_idx < 0:
             logger.warning(f"Invalid layer id specified: {layer_idx}")
             return
@@ -258,20 +281,20 @@ class LayerwiseOffloader:
             layer_bufs = self.block_buffers[idx]
 
             evt = torch.cuda.Event()
-            gpu_buffers: dict[torch.dtype, torch.Tensor] = {}
+            gpu_weights: dict[torch.dtype, torch.Tensor] = {}
 
             with torch.cuda.stream(self._copy_stream):
                 for dtype, cpu_weight in self.layer_cpu_weights[idx].items():
-                    gpu_buffer = torch.empty(cpu_weight.shape, dtype=dtype, device=self.device)
-                    gpu_buffer.copy_(cpu_weight, non_blocking=non_blocking)
-                    gpu_buffers[dtype] = gpu_buffer
+                    gpu_weight = torch.empty(cpu_weight.shape, dtype=dtype, device=self.device)
+                    gpu_weight.copy_(cpu_weight, non_blocking=non_blocking)
+                    gpu_weights[dtype] = gpu_weight
 
                 evt.record(self._copy_stream)
 
             for dtype in self.layer_metadata[idx]:
                 ordered_metadata: list[dict[str, Any]] = self.layer_metadata[idx][dtype]
 
-                gpu_buffer = gpu_buffers[dtype]
+                gpu_weight = gpu_weights[dtype]
 
                 for metadata in ordered_metadata:
                     target_name = metadata["name"]
@@ -279,7 +302,7 @@ class LayerwiseOffloader:
                         layer_params[target_name] if target_name in layer_params else layer_bufs[target_name]
                     )
 
-                    target_param_or_buf.data = gpu_buffer[
+                    target_param_or_buf.data = gpu_weight[
                         metadata["offset"] : metadata["offset"] + metadata["numel"]
                     ].view(metadata["shape"])
 
@@ -288,7 +311,7 @@ class LayerwiseOffloader:
 
     @torch.compiler.disable
     def offload_layer(self, layer_idx: int) -> None:
-        # to cpu
+        """Free GPU memory for layer by replacing tensors with empty placeholders."""
         if layer_idx >= self.num_blocks or layer_idx < 0:
             logger.warning(f"Invalid layer id specified: {layer_idx}")
             return
@@ -403,8 +426,8 @@ def apply_offload_hooks(
     elif layerwise_offload_dit:
         logger.info(f"Applying offloading hooks on {dit_names}")
 
-        for dit_module in dit_modules:
-            logger.info(f"Applying hook on {dit_module}")
+        for i, dit_module in enumerate(dit_modules):
+            logger.info(f"Applying hook on {dit_names[i]} ({dit_module.__class__.__name__})")
             # Get blocks attribute name from the model class
             blocks_attr_name = getattr(dit_module.__class__, "_layerwise_offload_blocks_attr", None)
             if blocks_attr_name is None:
@@ -428,11 +451,11 @@ def apply_offload_hooks(
             for name, m in dit_module.named_children():
                 # Skip the blocks module (layers to be offloaded)
                 if name == blocks_attr_name:
-                    logger.info(f"Skipped module {name}")
+                    logger.debug(f"Skipped module {name}")
                     continue
 
                 m.to(device)
-                logger.info(f"Moved {name} to device {device}")
+                logger.debug(f"Moved {name} to device {device}")
 
             # set to the module (transformer)
             offloader = LayerwiseOffloader(blocks, device, pin_cpu_memory, od_config.layerwise_num_gpu_layers)
