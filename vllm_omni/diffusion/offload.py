@@ -405,15 +405,28 @@ def apply_offload_hooks(
 
         for dit_module in dit_modules:
             logger.info(f"Applying hook on {dit_module}")
-            # HACK: hardcoded blocks attr name for testing
-            # blocks_attr_name = "transformer_blocks"
-            blocks_attr_name = "blocks"
+            # Get blocks attribute name from the model class
+            blocks_attr_name = getattr(dit_module.__class__, "_layerwise_offload_blocks_attr", None)
+            if blocks_attr_name is None:
+                logger.warning(
+                    f"No _layerwise_offload_blocks_attr defined for {dit_module.__class__.__name__}, "
+                    "skipping layerwise offloading"
+                )
+                continue
+
             _blocks = getattr(dit_module, blocks_attr_name, None)
+            if _blocks is None:
+                logger.warning(
+                    f"Blocks (layers) '{blocks_attr_name}' not found on {dit_module.__class__.__name__}, "
+                    "skipping layerwise offloading"
+                )
+                continue
+
             blocks = list(_blocks)
 
             # move modules other than blocks to gpu and keep them on gpu
             for name, m in dit_module.named_children():
-                # HACK: hardcoded blocks attr name
+                # Skip the blocks module (layers to be offloaded)
                 if name == blocks_attr_name:
                     logger.info(f"Skipped module {name}")
                     continue
