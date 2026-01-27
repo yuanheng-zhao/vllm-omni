@@ -137,6 +137,7 @@ class LayerwiseOffloader:
         num_gpu_layers: int = 1,
     ):
         assert all(isinstance(m, nn.Module) for m in blocks), "All transformer blocks must be torch.nn.Module"
+        assert torch.cuda.is_available(), "Layerwise offloading is only supported on cuda devices for now"
 
         self.blocks = blocks
         self.device = device
@@ -338,6 +339,40 @@ class LayerwiseOffloader:
         self._pre_hook_handles.clear()
         self._post_hook_handles.clear()
 
+    @staticmethod
+    def get_blocks_attr_name(model: nn.Module) -> str | None:
+        """Retrieve blocks attribute name from provided DiT model"""
+        return getattr(model.__class__, "_layerwise_offload_blocks_attr", None)
+
+    @staticmethod
+    def get_blocks_from_dit(model: nn.Module) -> list[nn.Module]:
+        """
+        Retrieve a list of blocks from provided DiT model. Blocks attribute name
+        are found by `_layerwise_offload_blocks_attr` set to DiT models. For example,
+
+        ```
+        class WanTransformer3DModel(nn.Module):
+            _layerwise_offload_blocks_attr = "blocks"
+        ```
+        """
+        blocks_attr_name = LayerwiseOffloader.get_blocks_attr_name(model)
+        if blocks_attr_name is None:
+            logger.warning(
+                f"No _layerwise_offload_blocks_attr defined for {model.__class__.__name__}, "
+                "skipping layerwise offloading"
+            )
+            return []
+
+        _blocks = getattr(model, blocks_attr_name, None)
+        if _blocks is None:
+            logger.warning(
+                f"Blocks (layers) '{blocks_attr_name}' not found on {model.__class__.__name__}, "
+                "skipping layerwise offloading"
+            )
+            return []
+
+        return list(_blocks)
+
 
 def apply_offload_hooks(
     model: nn.Module,
@@ -362,6 +397,11 @@ def apply_offload_hooks(
 
     if not enable_cpu_offload and not layerwise_offload_dit:
         return
+    # NOTE: For now, model-wise and layer-wise (block-wise) offloading
+    #       are functioning as expected when cuda device is available
+    if not torch.cuda.is_available() or torch.cuda.device_count() < 1:
+        logger.info("CPU Offloading requires cuda devices available. Skipping for now...")
+        return
 
     # Find DiT/transformer modules
     dit_modules: list[nn.Module] = []
@@ -385,12 +425,12 @@ def apply_offload_hooks(
     if not dit_modules:
         logger.warning("enable_cpu_offload enabled but no transformer/dit/unet found")
         return
-
     if device is None:
         try:
             device = next(dit_modules[0].parameters()).device
         except StopIteration:
-            device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+            logger.error("Fail to get device of pipeline. Skipping applying offloading hooks")
+            return
 
     # Collect all encoders
     encoders: list[nn.Module] = []
@@ -399,10 +439,21 @@ def apply_offload_hooks(
         if hasattr(model, attr) and getattr(model, attr) is not None:
             encoders.append(getattr(model, attr))
             encoder_names.append(attr)
-
     if not encoders and enable_cpu_offload:
         logger.warning("enable_cpu_offload enabled but no encoders found")
         return
+    for enc in encoders:
+        enc.to(device)
+
+    # Collect VAE
+    for name in ["vae"]:
+        module = getattr(model, name, None)
+        if module is None:
+            continue
+        try:
+            module.to(device, non_blocking=True)
+        except Exception as exc:
+            logger.debug("Failed to move %s to GPU: %s", name, exc)
 
     if enable_cpu_offload:
         # Initial state: keep DiT modules on CPU (encoders typically run first)
@@ -428,24 +479,15 @@ def apply_offload_hooks(
 
         for i, dit_module in enumerate(dit_modules):
             logger.info(f"Applying hook on {dit_names[i]} ({dit_module.__class__.__name__})")
-            # Get blocks attribute name from the model class
-            blocks_attr_name = getattr(dit_module.__class__, "_layerwise_offload_blocks_attr", None)
-            if blocks_attr_name is None:
+            blocks_attr_name = LayerwiseOffloader.get_blocks_attr_name(dit_module)
+            blocks = LayerwiseOffloader.get_blocks_from_dit(dit_module)
+
+            if not blocks_attr_name or not blocks:
                 logger.warning(
-                    f"No _layerwise_offload_blocks_attr defined for {dit_module.__class__.__name__}, "
-                    "skipping layerwise offloading"
+                    "Target layers (blocks) are not found. "
+                    f"Skipping offloading on {dit_names[i]} ({dit_module.__class__.__name__})"
                 )
                 continue
-
-            _blocks = getattr(dit_module, blocks_attr_name, None)
-            if _blocks is None:
-                logger.warning(
-                    f"Blocks (layers) '{blocks_attr_name}' not found on {dit_module.__class__.__name__}, "
-                    "skipping layerwise offloading"
-                )
-                continue
-
-            blocks = list(_blocks)
 
             # move modules other than blocks to gpu and keep them on gpu
             for name, m in dit_module.named_children():
@@ -465,8 +507,3 @@ def apply_offload_hooks(
                 f"Layerwise offloading enabled on {len(blocks)} layers (blocks), "
                 f"with {od_config.layerwise_num_gpu_layers} kept on device)"
             )
-
-        for enc in encoders:
-            enc.to(device)
-
-        torch.cuda.synchronize()

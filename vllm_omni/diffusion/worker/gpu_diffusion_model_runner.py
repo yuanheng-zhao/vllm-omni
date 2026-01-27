@@ -107,17 +107,8 @@ class GPUDiffusionModelRunner:
         )
         logger.info("Model runner: Model loaded successfully.")
 
-        # Apply CPU offloading (DiT <-> encoders mutual exclusion)
+        # Apply CPU offloading
         if self.od_config.enable_cpu_offload or self.od_config.layerwise_offload_dit:
-            for name in ["vae"]:
-                module = getattr(self.pipeline, name, None)
-                if module is None:
-                    continue
-                try:
-                    module.to(self.device, non_blocking=True)
-                except Exception as exc:
-                    logger.debug("Failed to move %s to GPU: %s", name, exc)
-
             apply_offload_hooks(self.pipeline, self.od_config, device=self.device)
 
         # Apply torch.compile if not in eager mode
