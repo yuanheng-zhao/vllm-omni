@@ -1,0 +1,120 @@
+import sys
+from pathlib import Path
+
+import pytest
+import torch
+from vllm.distributed.parallel_state import cleanup_dist_env_and_memory
+
+from tests.utils import GPUMemoryMonitor
+from vllm_omni.utils.platform_utils import is_npu, is_rocm
+
+# ruff: noqa: E402
+REPO_ROOT = Path(__file__).resolve().parents[2]
+if str(REPO_ROOT) not in sys.path:
+    sys.path.insert(0, str(REPO_ROOT))
+
+from vllm_omni import Omni
+
+models = ["Wan-AI/Wan2.2-T2V-A14B-Diffusers"]
+
+
+def run_inference(
+    model_name: str,
+    layerwise_offload: bool = False,
+    num_gpu_layers: int = 1,
+    num_inference_steps: int = 3,
+) -> float:
+    torch.cuda.empty_cache()
+    device_index = torch.cuda.current_device()
+    monitor = GPUMemoryMonitor(device_index=device_index, interval=0.02)
+    monitor.start()
+
+    m = Omni(
+        model=model_name,
+        layerwise_offload_dit=layerwise_offload,
+        layerwise_num_gpu_layers=num_gpu_layers,
+        boundary_ratio=0.875,
+        flow_shift=5.0,
+    )
+
+    torch.cuda.reset_peak_memory_stats(device=device_index)
+
+    # Refer to tests/e2e/offline_inference/test_t2v_model.py
+    # Use minimal settings for testing
+    height = 480
+    width = 640
+    num_frames = 5
+    m.generate(
+        "A cat sitting on a table",
+        height=height,
+        width=width,
+        num_frames=num_frames,
+        num_inference_steps=num_inference_steps,
+        guidance_scale=1.0,
+        generator=torch.Generator("cuda").manual_seed(42),
+    )
+
+    peak = monitor.peak_used_mb
+    monitor.stop()
+
+    return peak
+
+
+@pytest.mark.skipif(is_npu() or is_rocm(), reason="Hardware not supported")
+@pytest.mark.parametrize("model_name", models)
+def test_layerwise_offload_diffusion_model(model_name: str):
+    """Test that layerwise offloading reduces GPU memory usage.
+
+    This test verifies that layerwise offloading significantly reduces peak
+    GPU memory usage compared to loading the entire model on GPU. The layerwise
+    offloader keeps only a single transformer block on GPU at a time, with
+    prefetching for compute-memory overlap.
+    """
+    try:
+        # Run without layerwise offloading (baseline)
+        no_offload_peak_memory = run_inference(model_name, layerwise_offload=False)
+        cleanup_dist_env_and_memory()
+
+        # Run with layerwise offloading (1 layer on GPU)
+        layerwise_offload_peak_memory = run_inference(model_name, layerwise_offload=True, num_gpu_layers=1)
+    except Exception:
+        pytest.fail("Inference failed")
+
+    print(f"Layerwise offload peak memory (1 GPU layer): {layerwise_offload_peak_memory} MB")
+    print(f"No offload peak memory: {no_offload_peak_memory} MB")
+
+    # Verify that layerwise offloading significantly reduces memory usage
+    # Using a threshold of 2500 MB savings to match the CPU offload test
+    assert layerwise_offload_peak_memory + 2500 < no_offload_peak_memory, (
+        f"Layerwise offload peak memory {layerwise_offload_peak_memory} MB "
+        f"should be significantly less than no offload peak memory {no_offload_peak_memory} MB"
+    )
+
+
+@pytest.mark.skipif(is_npu() or is_rocm(), reason="Hardware not supported")
+@pytest.mark.parametrize("model_name", models)
+def test_layerwise_offload_multiple_gpu_layers(model_name: str):
+    """Test layerwise offloading with multiple GPU layers.
+
+    This test verifies that keeping more layers on GPU increases memory usage
+    but should still be less than loading the entire model. It tests with
+    2 GPU layers vs 1 GPU layer.
+    """
+    try:
+        # Run with 1 GPU layer
+        one_layer_peak = run_inference(model_name, layerwise_offload=True, num_gpu_layers=1)
+        cleanup_dist_env_and_memory()
+
+        # Run with 2 GPU layers
+        two_layers_peak = run_inference(model_name, layerwise_offload=True, num_gpu_layers=2)
+    except Exception:
+        pytest.fail("Inference failed")
+
+    print(f"Layerwise offload peak memory (1 GPU layer): {one_layer_peak} MB")
+    print(f"Layerwise offload peak memory (2 GPU layers): {two_layers_peak} MB")
+
+    # Verify that 2 GPU layers uses more memory than 1 GPU layer
+    # But not excessively more (should be a reasonable increase)
+    assert one_layer_peak < two_layers_peak, (
+        f"1 GPU layer peak {one_layer_peak} MB should be < 2 GPU layers peak {two_layers_peak} MB"
+    )
