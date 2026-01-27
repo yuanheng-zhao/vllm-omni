@@ -397,8 +397,16 @@ def apply_offload_hooks(
 
     if not enable_cpu_offload and not layerwise_offload_dit:
         return
-    # NOTE: For now, model-wise and layer-wise (block-wise) offloading
-    #       are functioning as expected when cuda device is available
+    if enable_cpu_offload and layerwise_offload_dit:
+        # NOTE: Model-wise and layerwise cpu offloading are not supported together at this moment,
+        # consider layerwise offloading has higher priority than model-wise offloading
+        enable_cpu_offload = False
+        logger.info(
+            "Model-wise and layer-wise CPU offloading are not supported together at this moment. "
+            "Automatically disabled model-wise offloading."
+        )
+    # For now, model-wise and layer-wise (block-wise) offloading
+    # are functioning as expected when cuda device is available
     if not torch.cuda.is_available() or torch.cuda.device_count() < 1:
         logger.info("CPU Offloading requires cuda devices available. Skipping for now...")
         return
