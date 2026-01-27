@@ -37,7 +37,6 @@ nav:
       - Cache-DiT: user_guide/diffusion/cache_dit_acceleration.md
       - Parallelism Acceleration: user_guide/diffusion/parallelism_acceleration.md
       - CPU Offloading: user_guide/diffusion/cpu_offload_diffusion.md
-      - Layerwise CPU Offloading: user_guide/diffusion/layerwise_offload_diffusion.md
 - Developer Guide:
   - General:
     - contributing/README.md
