@@ -392,12 +392,12 @@ def apply_offload_hooks(
         od_config: OmniDiffusionConfig with offload settings
     """
     enable_cpu_offload = getattr(od_config, "enable_cpu_offload", False)
-    layerwise_offload_dit = getattr(od_config, "layerwise_offload_dit", False)
+    enable_layerwise_offload = getattr(od_config, "enable_layerwise_offload", False)
     pin_cpu_memory = getattr(od_config, "pin_cpu_memory", True)
 
-    if not enable_cpu_offload and not layerwise_offload_dit:
+    if not enable_cpu_offload and not enable_layerwise_offload:
         return
-    if enable_cpu_offload and layerwise_offload_dit:
+    if enable_cpu_offload and enable_layerwise_offload:
         # NOTE: Model-wise and layerwise cpu offloading are not supported together at this moment,
         # consider layerwise offloading has higher priority than model-wise offloading
         enable_cpu_offload = False
@@ -482,7 +482,7 @@ def apply_offload_hooks(
             ", ".join(dit_names),
             ", ".join(encoder_names),
         )
-    elif layerwise_offload_dit:
+    elif enable_layerwise_offload:
         logger.info(f"Applying offloading hooks on {dit_names}")
 
         for i, dit_module in enumerate(dit_modules):

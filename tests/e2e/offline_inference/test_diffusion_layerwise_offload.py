@@ -31,7 +31,7 @@ def run_inference(
 
     m = Omni(
         model=model_name,
-        layerwise_offload_dit=layerwise_offload,
+        enable_layerwise_offload=layerwise_offload,
         layerwise_num_gpu_layers=num_gpu_layers,
         boundary_ratio=0.875,
         flow_shift=5.0,

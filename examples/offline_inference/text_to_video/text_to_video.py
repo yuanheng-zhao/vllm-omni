@@ -43,12 +43,12 @@ def parse_args() -> argparse.Namespace:
         help="Enable CPU offloading for diffusion models.",
     )
     parser.add_argument(
-        "--enable_layerwise_offload",
+        "--enable-layerwise-offload",
         action="store_true",
         help="Enable layerwise (blockwise) offloading on DiT modules.",
     )
     parser.add_argument(
-        "--num_gpu_layers", type=int, default=1, help="Number of layers (blocks) to keep on GPU during generation."
+        "--num-gpu-layers", type=int, default=1, help="Number of layers (blocks) to keep on GPU during generation."
     )
     parser.add_argument(
         "--ulysses_degree",
@@ -91,7 +91,7 @@ def main():
 
     omni = Omni(
         model=args.model,
-        layerwise_offload_dit=args.enable_layerwise_offload,
+        enable_layerwise_offload=args.enable_layerwise_offload,
         layerwise_num_gpu_layers=args.num_gpu_layers,
         vae_use_slicing=vae_use_slicing,
         vae_use_tiling=vae_use_tiling,

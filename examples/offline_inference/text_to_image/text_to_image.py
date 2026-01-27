@@ -169,7 +169,7 @@ def main():
 
     omni = Omni(
         model=args.model,
-        layerwise_offload_dit=args.enable_layerwise_offload,
+        enable_layerwise_offload=args.enable_layerwise_offload,
         layerwise_num_gpu_layers=args.num_gpu_layers,
         vae_use_slicing=vae_use_slicing,
         vae_use_tiling=vae_use_tiling,

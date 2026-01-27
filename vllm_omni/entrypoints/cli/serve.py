@@ -195,7 +195,7 @@ class OmniServeCommand(CLISubcommand):
             help="Enable CPU offloading for diffusion models.",
         )
         serve_parser.add_argument(
-            "--layerwise-offload-dit",
+            "--enable-layerwise-offload",
             action="store_true",
             help="Enable layerwise (blockwise) offloading on DiT modules.",
         )

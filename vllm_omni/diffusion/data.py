@@ -289,7 +289,7 @@ class OmniDiffusionConfig:
     enable_cpu_offload: bool = False
 
     # Layer-wise offloading (block-level offloading) parameters
-    layerwise_offload_dit: bool = False
+    enable_layerwise_offload: bool = False
     # Number of transformer blocks to keep on GPU
     layerwise_num_gpu_layers: int = 1
 

@@ -69,7 +69,7 @@ Example of hook executions of a DiT model with n layers, by default keep a singl
 
 ### Configuration
 
-1. **Python API**: set `layerwise_offload_dit=True` and optionally `layerwise_num_gpu_layers`.
+1. **Python API**: set `enable_layerwise_offload=True` and optionally `layerwise_num_gpu_layers`.
 
 ```python
 from vllm_omni import Omni
@@ -77,7 +77,7 @@ from vllm_omni import Omni
 if __name__ == "__main__":
     m = Omni(
         model="Wan-AI/Wan2.2-T2V-A14B-Diffusers",
-        layerwise_offload_dit=True,
+        enable_layerwise_offload=True,
         ...
     )
 ```

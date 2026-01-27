@@ -78,7 +78,7 @@ class GPUDiffusionModelRunner:
                 for memory pool allocation (used for sleep mode).
         """
         load_device = (
-            "cpu" if self.od_config.enable_cpu_offload or self.od_config.layerwise_offload_dit else str(self.device)
+            "cpu" if self.od_config.enable_cpu_offload or self.od_config.enable_layerwise_offload else str(self.device)
         )
 
         def get_memory_context():
@@ -108,7 +108,7 @@ class GPUDiffusionModelRunner:
         logger.info("Model runner: Model loaded successfully.")
 
         # Apply CPU offloading
-        if self.od_config.enable_cpu_offload or self.od_config.layerwise_offload_dit:
+        if self.od_config.enable_cpu_offload or self.od_config.enable_layerwise_offload:
             apply_offload_hooks(self.pipeline, self.od_config, device=self.device)
 
         # Apply torch.compile if not in eager mode
