@@ -147,6 +147,11 @@ class LayerwiseOffloader:
         self.pin_memory = pin_memory
         self.num_gpu_layers = num_gpu_layers
         self.num_blocks = len(self.blocks)
+        if self.num_blocks == 0:
+            raise ValueError("LayerwiseOffloader requires at least one block, but found 0.")
+        if not (1 <= self.num_gpu_layers <= self.num_blocks):
+            raise ValueError(f"Invalid num_gpu_layers {self.num_gpu_layers} with {self.num_blocks} blocks")
+
         self._pre_hook_handles: list = []
         self._post_hook_handles: list = []
 
