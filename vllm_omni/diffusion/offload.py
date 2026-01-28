@@ -513,5 +513,5 @@ def apply_offload_hooks(
 
             logger.info(
                 f"Layerwise offloading enabled on {len(blocks)} layers (blocks), "
-                f"with {od_config.layerwise_num_gpu_layers} kept on device)"
+                f"with {od_config.layerwise_num_gpu_layers} kept on device"
             )
