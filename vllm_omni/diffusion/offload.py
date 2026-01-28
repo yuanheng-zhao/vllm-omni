@@ -127,6 +127,9 @@ class LayerwiseOffloader:
     Keeps only a sliding window of layers (blocks), by default a single layer, on GPU,
     prefetching the next block while the current block computes to approach compute - memcpy overlap.
     Unused blocks are freed on GPU.
+
+    Based on implementations from:
+    https://github.com/sgl-project/sglang/blob/v0.5.8/python/sglang/multimodal_gen/runtime/utils/layerwise_offload.py
     """
 
     def __init__(
