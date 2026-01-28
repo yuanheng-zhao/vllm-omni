@@ -290,7 +290,7 @@ class OmniDiffusionConfig:
 
     # Layer-wise offloading (block-level offloading) parameters
     enable_layerwise_offload: bool = False
-    # Number of transformer blocks to keep on GPU
+    # Number of transformer blocks ready for computation to keep on GPU
     layerwise_num_gpu_layers: int = 1
 
     use_fsdp_inference: bool = False

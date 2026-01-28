@@ -108,7 +108,10 @@ def parse_args() -> argparse.Namespace:
         help="Enable layerwise (blockwise) offloading on DiT modules.",
     )
     parser.add_argument(
-        "--num-gpu-layers", type=int, default=1, help="Number of layers (blocks) to keep on GPU during generation."
+        "--num-gpu-layers",
+        type=int,
+        default=1,
+        help="Number of ready layers (blocks) to keep on GPU during generation.",
     )
     parser.add_argument(
         "--tensor_parallel_size",
