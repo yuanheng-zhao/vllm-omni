@@ -6,6 +6,7 @@ import torch
 from vllm.distributed.parallel_state import cleanup_dist_env_and_memory
 
 from tests.utils import GPUMemoryMonitor
+from vllm_omni.inputs.data import OmniDiffusionSamplingParams
 from vllm_omni.utils.platform_utils import is_npu, is_rocm
 
 # ruff: noqa: E402
@@ -44,14 +45,17 @@ def run_inference(
     height = 480
     width = 640
     num_frames = 5
+
     m.generate(
         "A cat sitting on a table",
-        height=height,
-        width=width,
-        num_frames=num_frames,
-        num_inference_steps=num_inference_steps,
-        guidance_scale=1.0,
-        generator=torch.Generator("cuda").manual_seed(42),
+        OmniDiffusionSamplingParams(
+            height=height,
+            width=width,
+            generator=torch.Generator("cuda").manual_seed(42),
+            guidance_scale=1.0,
+            num_inference_steps=num_inference_steps,
+            num_frames=num_frames,
+        ),
     )
 
     peak = monitor.peak_used_mb

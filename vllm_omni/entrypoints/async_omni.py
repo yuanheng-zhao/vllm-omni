@@ -163,6 +163,8 @@ class AsyncOmni(OmniBase):
                     "cache_backend": cache_backend,
                     "cache_config": cache_config,
                     "enable_cpu_offload": kwargs.get("enable_cpu_offload", False),
+                    "enable_layerwise_offload": kwargs.get("enable_layerwise_offload", False),
+                    "layerwise_num_gpu_layers": kwargs.get("layerwise_num_gpu_layers", False),
                     "enforce_eager": kwargs.get("enforce_eager", False),
                 },
                 "final_output": True,
