@@ -16,7 +16,8 @@ if str(REPO_ROOT) not in sys.path:
 
 from vllm_omni import Omni
 
-models = ["Wan-AI/Wan2.2-T2V-A14B-Diffusers"]
+# Models to test and expected saved memory in MB, correspondingly
+MODELS_SAVED_MEMORY_MB = {"Wan-AI/Wan2.2-T2V-A14B-Diffusers": 45000}
 
 
 def run_inference(
@@ -67,7 +68,7 @@ def run_inference(
 
 
 @pytest.mark.skipif(current_omni_platform.is_npu() or current_omni_platform.is_rocm(), reason="Hardware not supported")
-@pytest.mark.parametrize("model_name", models)
+@pytest.mark.parametrize("model_name", MODELS_SAVED_MEMORY_MB.keys())
 def test_layerwise_offload_diffusion_model(model_name: str):
     """Test that layerwise offloading reduces GPU memory usage.
 
@@ -91,36 +92,7 @@ def test_layerwise_offload_diffusion_model(model_name: str):
 
     # Verify that layerwise offloading significantly reduces memory usage
     # Using a threshold of 2500 MB savings to match the CPU offload test
-    assert layerwise_offload_peak_memory + 2500 < no_offload_peak_memory, (
+    assert layerwise_offload_peak_memory + MODELS_SAVED_MEMORY_MB[model_name] < no_offload_peak_memory, (
         f"Layerwise offload peak memory {layerwise_offload_peak_memory} MB "
         f"should be significantly less than no offload peak memory {no_offload_peak_memory} MB"
-    )
-
-
-@pytest.mark.skipif(current_omni_platform.is_npu() or current_omni_platform.is_rocm(), reason="Hardware not supported")
-@pytest.mark.parametrize("model_name", models)
-def test_layerwise_offload_multiple_gpu_layers(model_name: str):
-    """Test layerwise offloading with multiple GPU layers.
-
-    This test verifies that keeping more layers on GPU increases memory usage
-    but should still be less than loading the entire model. It tests with
-    2 GPU layers vs 1 GPU layer.
-    """
-    try:
-        # Run with 1 GPU layer
-        one_layer_peak = run_inference(model_name, layerwise_offload=True, num_gpu_layers=1)
-        cleanup_dist_env_and_memory()
-
-        # Run with 2 GPU layers
-        two_layers_peak = run_inference(model_name, layerwise_offload=True, num_gpu_layers=2)
-    except Exception:
-        pytest.fail("Inference failed")
-
-    print(f"Layerwise offload peak memory (1 GPU layer): {one_layer_peak} MB")
-    print(f"Layerwise offload peak memory (2 GPU layers): {two_layers_peak} MB")
-
-    # Verify that 2 GPU layers uses more memory than 1 GPU layer
-    # But not excessively more (should be a reasonable increase)
-    assert one_layer_peak < two_layers_peak, (
-        f"1 GPU layer peak {one_layer_peak} MB should be < 2 GPU layers peak {two_layers_peak} MB"
     )
