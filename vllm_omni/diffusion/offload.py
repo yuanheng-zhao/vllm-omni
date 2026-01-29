@@ -68,7 +68,7 @@ class SequentialOffloader:
 
         # Release allocator blocks when tensors leave the GPU.
         if previous_device.type != "cpu":
-            current_omni_platform.empty_cache()
+            torch.cuda.empty_cache()
 
         if self.pin_memory:
             for p in module.parameters():
@@ -485,7 +485,7 @@ def apply_offload_hooks(
         for dit_mod in dit_modules:
             dit_mod.to("cpu")
 
-        current_omni_platform.empty_cache()
+        torch.cuda.empty_cache()
 
         if pin_cpu_memory:
             for dit_mod in dit_modules:
