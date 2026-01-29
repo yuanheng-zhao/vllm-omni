@@ -20,6 +20,8 @@ import torch
 from torch import nn
 from vllm.logger import init_logger
 
+from vllm_omni.platforms import current_omni_platform
+
 if TYPE_CHECKING:
     from vllm_omni.diffusion.data import OmniDiffusionConfig
 
@@ -65,8 +67,8 @@ class SequentialOffloader:
         module.to("cpu", non_blocking=True)
 
         # Release allocator blocks when tensors leave the GPU.
-        if previous_device.type == "cuda" and torch.cuda.is_available():
-            torch.cuda.empty_cache()
+        if previous_device.type != "cpu":
+            current_omni_platform.empty_cache()
 
         if self.pin_memory:
             for p in module.parameters():
@@ -89,7 +91,9 @@ class SequentialOffloader:
         for enc in self.encoders:
             self._to_cpu(enc)
         self._to_gpu(module)
-        torch.cuda.synchronize()
+
+        current_omni_platform.synchronize()
+
         logger.debug("Swapped: encoders -> CPU, DiT -> GPU")
 
     def _encoder_pre_hook(self, module: nn.Module, args: tuple) -> None:
@@ -97,7 +101,9 @@ class SequentialOffloader:
         for dit_mod in self.dits:
             self._to_cpu(dit_mod)
         self._to_gpu(module)
-        torch.cuda.synchronize()
+
+        current_omni_platform.synchronize()
+
         logger.debug("Swapped: DiT -> CPU, encoder -> GPU")
 
     def register(self) -> None:
@@ -140,7 +146,7 @@ class LayerwiseOffloader:
         num_gpu_layers: int = 1,
     ):
         assert all(isinstance(m, nn.Module) for m in blocks), "All transformer blocks must be torch.nn.Module"
-        assert torch.cuda.is_available(), "Layerwise offloading is only supported on cuda devices for now"
+        assert current_omni_platform.is_cuda(), "Layerwise offloading is only supported on cuda devices for now"
 
         self.blocks = blocks
         self.device = device
@@ -415,7 +421,7 @@ def apply_offload_hooks(
         )
     # For now, model-wise and layer-wise (block-wise) offloading
     # are functioning as expected when cuda device is available
-    if not torch.cuda.is_available() or torch.cuda.device_count() < 1:
+    if not current_omni_platform.is_cuda() or current_omni_platform.get_device_count() < 1:
         logger.info("CPU Offloading requires cuda devices available. Skipping for now...")
         return
 
@@ -445,8 +451,11 @@ def apply_offload_hooks(
         try:
             device = next(dit_modules[0].parameters()).device
         except StopIteration:
-            logger.error("Fail to get device of pipeline. Skipping applying offloading hooks")
-            return
+            try:
+                device = current_omni_platform.get_torch_device()
+            except (NotImplementedError, AttributeError):
+                logger.error("Fail to get device of pipeline. Skipping applying offloading hooks")
+                return
 
     # Collect all encoders
     encoders: list[nn.Module] = []
@@ -475,9 +484,10 @@ def apply_offload_hooks(
         # Initial state: keep DiT modules on CPU (encoders typically run first)
         for dit_mod in dit_modules:
             dit_mod.to("cpu")
-        if torch.cuda.is_available():
-            torch.cuda.empty_cache()
-        if pin_cpu_memory and torch.cuda.is_available():
+
+        current_omni_platform.empty_cache()
+
+        if pin_cpu_memory:
             for dit_mod in dit_modules:
                 for p in dit_mod.parameters():
                     if p.data.device.type == "cpu" and not p.data.is_pinned():
