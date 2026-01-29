@@ -82,12 +82,16 @@ def test_layerwise_offload_diffusion_model(model_name: str):
         no_offload_peak_memory = run_inference(model_name, layerwise_offload=False)
         cleanup_dist_env_and_memory()
 
-        # Run with layerwise offloading (1 layer on GPU)
+        # Run with layerwise offloading (1 layer on device)
         layerwise_offload_peak_memory = run_inference(model_name, layerwise_offload=True, num_gpu_layers=1)
+
+        # Run with 2 layers on device
+        layerwise_offload_two_layers_peak = run_inference(model_name, layerwise_offload=True, num_gpu_layers=2)
     except Exception:
         pytest.fail("Inference failed")
 
     print(f"Layerwise offload peak memory (1 GPU layer): {layerwise_offload_peak_memory} MB")
+    print(f"Layerwise offload peak memory (2 GPU layers): {layerwise_offload_two_layers_peak} MB")
     print(f"No offload peak memory: {no_offload_peak_memory} MB")
 
     # Verify that layerwise offloading significantly reduces memory usage
@@ -95,4 +99,11 @@ def test_layerwise_offload_diffusion_model(model_name: str):
     assert layerwise_offload_peak_memory + MODELS_SAVED_MEMORY_MB[model_name] < no_offload_peak_memory, (
         f"Layerwise offload peak memory {layerwise_offload_peak_memory} MB "
         f"should be significantly less than no offload peak memory {no_offload_peak_memory} MB"
+    )
+
+    # Verify that 2 GPU layers uses more memory than 1 GPU layer
+    # But not excessively more (should be a reasonable increase)
+    assert layerwise_offload_peak_memory < layerwise_offload_two_layers_peak, (
+        f"1 GPU layer peak {layerwise_offload_peak_memory} MB should be < "
+        f"2 GPU layers peak {layerwise_offload_two_layers_peak} MB"
     )
