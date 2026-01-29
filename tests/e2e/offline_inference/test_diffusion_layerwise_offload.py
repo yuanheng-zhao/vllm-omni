@@ -7,7 +7,7 @@ from vllm.distributed.parallel_state import cleanup_dist_env_and_memory
 
 from tests.utils import GPUMemoryMonitor
 from vllm_omni.inputs.data import OmniDiffusionSamplingParams
-from vllm_omni.utils.platform_utils import is_npu, is_rocm
+from vllm_omni.platforms import current_omni_platform
 
 # ruff: noqa: E402
 REPO_ROOT = Path(__file__).resolve().parents[2]
@@ -25,6 +25,8 @@ def run_inference(
     num_gpu_layers: int = 1,
     num_inference_steps: int = 3,
 ) -> float:
+    # For now, only support on GPU, so apply torch.cuda operations here
+    # NPU / ROCm platforms are expected to be detected and skipped this test function
     torch.cuda.empty_cache()
     device_index = torch.cuda.current_device()
     monitor = GPUMemoryMonitor(device_index=device_index, interval=0.02)
@@ -64,7 +66,7 @@ def run_inference(
     return peak
 
 
-@pytest.mark.skipif(is_npu() or is_rocm(), reason="Hardware not supported")
+@pytest.mark.skipif(current_omni_platform.is_npu() or current_omni_platform.is_rocm(), reason="Hardware not supported")
 @pytest.mark.parametrize("model_name", models)
 def test_layerwise_offload_diffusion_model(model_name: str):
     """Test that layerwise offloading reduces GPU memory usage.
@@ -95,7 +97,7 @@ def test_layerwise_offload_diffusion_model(model_name: str):
     )
 
 
-@pytest.mark.skipif(is_npu() or is_rocm(), reason="Hardware not supported")
+@pytest.mark.skipif(current_omni_platform.is_npu() or current_omni_platform.is_rocm(), reason="Hardware not supported")
 @pytest.mark.parametrize("model_name", models)
 def test_layerwise_offload_multiple_gpu_layers(model_name: str):
     """Test layerwise offloading with multiple GPU layers.
