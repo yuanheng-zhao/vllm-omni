@@ -27,7 +27,7 @@ from tests.conftest import (
     generate_synthetic_video,
     modify_stage_config,
 )
-from vllm_omni.utils import is_rocm
+from vllm_omni.platforms import current_omni_platform
 
 models = ["Qwen/Qwen3-Omni-30B-A3B-Instruct"]
 
@@ -57,7 +57,7 @@ def get_chunk_config():
 
 CHUNK_CONFIG_PATH = get_chunk_config()
 # CI stage config for 2xH100-80G GPUs or AMD GPU MI325
-if is_rocm():
+if current_omni_platform.is_rocm():
     # ROCm stage config optimized for MI325 GPU
     stage_configs = [str(Path(__file__).parent / "stage_configs" / "rocm" / "qwen3_omni_ci.yaml")]
 else:
@@ -133,7 +133,7 @@ def dummy_messages_from_video_data(
 
 def get_prompt(prompt_type="text_only"):
     prompts = {
-        "text_only": "What is the capital of China?",
+        "text_only": "What is the capital of China? Answer in 20 words.",
         "mix": "What is recited in the audio? What is in this image? Describe the video briefly.",
     }
     return prompts.get(prompt_type, prompts["text_only"])
@@ -144,7 +144,6 @@ def get_max_batch_size(size_type="few"):
     return batch_sizes.get(size_type, 5)
 
 
-@pytest.mark.skipif(is_rocm(), reason="Test skipped on AMD environment due to known output issues")
 @pytest.mark.parametrize("omni_server", test_params, indirect=True)
 def test_mix_to_text_audio_001(client: openai.OpenAI, omni_server, request) -> None:
     """
@@ -224,7 +223,6 @@ def test_mix_to_text_audio_001(client: openai.OpenAI, omni_server, request) -> N
     assert similarity > 0.9, "The audio content is not same as the text"
 
 
-@pytest.mark.skipif(is_rocm(), reason="Test skipped on AMD environment due to known output issues")
 @pytest.mark.parametrize("omni_server", test_params, indirect=True)
 def test_text_to_text_audio_001(client: openai.OpenAI, omni_server) -> None:
     """

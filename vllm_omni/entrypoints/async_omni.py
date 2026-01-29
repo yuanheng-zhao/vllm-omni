@@ -162,6 +162,7 @@ class AsyncOmni(OmniBase):
                     "vae_use_tiling": kwargs.get("vae_use_tiling", False),
                     "cache_backend": cache_backend,
                     "cache_config": cache_config,
+                    "enable_cache_dit_summary": kwargs.get("enable_cache_dit_summary", False),
                     "enable_cpu_offload": kwargs.get("enable_cpu_offload", False),
                     "enable_layerwise_offload": kwargs.get("enable_layerwise_offload", False),
                     "layerwise_num_gpu_layers": kwargs.get("layerwise_num_gpu_layers", False),
