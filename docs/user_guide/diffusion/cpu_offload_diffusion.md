@@ -82,7 +82,7 @@ if __name__ == "__main__":
     )
 ```
 
-2. **CLI**: pass `--enable-layerwise-offload` and `--num-gpu-layers` to the diffusion service entrypoint.
+2. **CLI**: pass `--enable-layerwise-offload` and `--layerwise-num-gpu-layers` to the diffusion service entrypoint.
 
 ### Supported Models
 

@@ -200,7 +200,7 @@ class OmniServeCommand(CLISubcommand):
             help="Enable layerwise (blockwise) offloading on DiT modules.",
         )
         serve_parser.add_argument(
-            "--num-gpu-layers",
+            "--layerwise-num-gpu-layers",
             type=int,
             default=1,
             help="Number of layers (blocks) to keep on GPU during generation.",
