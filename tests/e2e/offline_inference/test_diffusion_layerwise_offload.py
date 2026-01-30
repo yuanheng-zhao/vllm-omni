@@ -95,7 +95,7 @@ def test_layerwise_offload_diffusion_model(model_name: str):
     print(f"No offload peak memory: {no_offload_peak_memory} MB")
 
     # Verify that layerwise offloading significantly reduces memory usage
-    # Using a threshold of 2500 MB savings to match the CPU offload test
+    # Passes only if the actual savings exceeds the expected savings
     assert layerwise_offload_peak_memory + MODELS_SAVED_MEMORY_MB[model_name] < no_offload_peak_memory, (
         f"Layerwise offload peak memory {layerwise_offload_peak_memory} MB "
         f"should be significantly less than no offload peak memory {no_offload_peak_memory} MB"
