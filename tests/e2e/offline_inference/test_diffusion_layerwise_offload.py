@@ -17,7 +17,7 @@ if str(REPO_ROOT) not in sys.path:
 from vllm_omni import Omni
 
 # Models to test and expected saved memory in MB, correspondingly
-MODELS_SAVED_MEMORY_MB = {"Wan-AI/Wan2.2-T2V-A14B-Diffusers": 45000}
+MODELS_SAVED_MEMORY_MB = {"riverclouds/qwen_image_random": 4500}
 
 
 def run_inference(
@@ -84,6 +84,7 @@ def test_layerwise_offload_diffusion_model(model_name: str):
 
         # Run with layerwise offloading (1 layer on device)
         layerwise_offload_peak_memory = run_inference(model_name, layerwise_offload=True, num_gpu_layers=1)
+        cleanup_dist_env_and_memory()
 
         # Run with 2 layers on device
         layerwise_offload_two_layers_peak = run_inference(model_name, layerwise_offload=True, num_gpu_layers=2)
