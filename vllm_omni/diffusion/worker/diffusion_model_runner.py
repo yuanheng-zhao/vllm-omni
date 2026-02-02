@@ -26,7 +26,7 @@ from vllm_omni.diffusion.compile import regionally_compile
 from vllm_omni.diffusion.data import DiffusionOutput, OmniDiffusionConfig
 from vllm_omni.diffusion.forward_context import set_forward_context
 from vllm_omni.diffusion.model_loader.diffusers_loader import DiffusersPipelineLoader
-from vllm_omni.diffusion.offload import apply_offload_hooks
+from vllm_omni.diffusion.offload import get_offload_backend
 from vllm_omni.diffusion.request import OmniDiffusionRequest
 from vllm_omni.distributed.omni_connectors.kv_transfer_manager import OmniKVTransferManager
 from vllm_omni.platforms import current_omni_platform
@@ -62,6 +62,7 @@ class DiffusionModelRunner:
         self.device = device
         self.pipeline = None
         self.cache_backend = None
+        self.offload_backend = None
 
         # Initialize KV cache manager for connector management
         self.kv_transfer_manager = OmniKVTransferManager.from_od_config(od_config)
@@ -108,8 +109,9 @@ class DiffusionModelRunner:
         logger.info("Model runner: Model loaded successfully.")
 
         # Apply CPU offloading
-        if self.od_config.enable_cpu_offload or self.od_config.enable_layerwise_offload:
-            apply_offload_hooks(self.pipeline, self.od_config, device=self.device)
+        self.offload_backend = get_offload_backend(self.od_config, device=self.device)
+        if self.offload_backend is not None:
+            self.offload_backend.enable(self.pipeline)
 
         # Apply torch.compile if not in eager mode
         if not self.od_config.enforce_eager:

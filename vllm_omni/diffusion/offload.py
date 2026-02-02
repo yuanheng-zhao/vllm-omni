@@ -12,6 +12,9 @@ This allows running large models on limited GPU memory.
 
 from __future__ import annotations
 
+from abc import ABC, abstractmethod
+from dataclasses import dataclass
+from enum import Enum
 from functools import partial
 from itertools import chain
 from typing import TYPE_CHECKING, Any
@@ -26,6 +29,178 @@ if TYPE_CHECKING:
     from vllm_omni.diffusion.data import OmniDiffusionConfig
 
 logger = init_logger(__name__)
+
+
+class OffloadStrategy(Enum):
+    """Offload strategy types."""
+
+    NONE = "none"
+    MODEL_LEVEL = "model_level"  # Sequential offloading between DiT and encoders
+    LAYER_WISE = "layer_wise"  # Block-level offloading with sliding window
+
+
+@dataclass
+class OffloadConfig:
+    """Validated offload configuration."""
+
+    strategy: OffloadStrategy
+    pin_cpu_memory: bool = True
+    layerwise_num_gpu_layers: int = 1
+
+    @classmethod
+    def from_od_config(cls, od_config: OmniDiffusionConfig) -> OffloadConfig:
+        """Extract and validate offload settings from OmniDiffusionConfig.
+
+        Enforces mutual exclusion between model-level and layer-wise offloading.
+        Layer-wise takes priority if both are enabled.
+
+        Args:
+            od_config: OmniDiffusionConfig with offload settings
+
+        Returns:
+            OffloadConfig with validated settings
+        """
+        enable_cpu_offload = getattr(od_config, "enable_cpu_offload", False)
+        enable_layerwise_offload = getattr(od_config, "enable_layerwise_offload", False)
+        pin_cpu_memory = getattr(od_config, "pin_cpu_memory", True)
+        layerwise_num_gpu_layers = getattr(od_config, "layerwise_num_gpu_layers", 1)
+
+        # Determine strategy (mutual exclusion, layer-wise takes priority)
+        if enable_layerwise_offload:
+            strategy = OffloadStrategy.LAYER_WISE
+            if enable_cpu_offload:
+                logger.info(
+                    "Both model-level and layer-wise offloading enabled. "
+                    "Layer-wise takes priority, disabling model-level offloading."
+                )
+        elif enable_cpu_offload:
+            strategy = OffloadStrategy.MODEL_LEVEL
+        else:
+            strategy = OffloadStrategy.NONE
+
+        return cls(
+            strategy=strategy,
+            pin_cpu_memory=pin_cpu_memory,
+            layerwise_num_gpu_layers=layerwise_num_gpu_layers,
+        )
+
+
+@dataclass
+class PipelineModules:
+    """Discovered pipeline modules for offloading."""
+
+    dits: list[nn.Module]
+    dit_names: list[str]
+    encoders: list[nn.Module]
+    encoder_names: list[str]
+    vae: nn.Module | None = None
+
+
+class ModuleDiscovery:
+    """Discovers pipeline components for offloading."""
+
+    DIT_ATTRS = ["transformer", "transformer_2", "dit"]
+    ENCODER_ATTRS = ["text_encoder", "text_encoder_2", "text_encoder_3", "image_encoder"]
+    VAE_ATTRS = ["vae"]
+
+    @staticmethod
+    def discover(pipeline: nn.Module) -> PipelineModules:
+        """Discover DiT, encoder, and VAE modules from pipeline.
+
+        Args:
+            pipeline: Diffusion pipeline model
+
+        Returns:
+            PipelineModules with lists of discovered modules and names
+        """
+        # Find DiT/transformer modules
+        dit_modules: list[nn.Module] = []
+        dit_names: list[str] = []
+        for attr in ModuleDiscovery.DIT_ATTRS:
+            if not hasattr(pipeline, attr):
+                continue
+            module_obj = getattr(pipeline, attr)
+            if module_obj is None:
+                continue
+
+            if not isinstance(module_obj, nn.Module):
+                logger.warning(f"Expected {attr} to be nn.Module, got {type(module_obj)!r}")
+                continue
+
+            # Avoid duplicates
+            if module_obj in dit_modules:
+                continue
+
+            dit_modules.append(module_obj)
+            dit_names.append(attr)
+
+        # Collect all encoders
+        encoders: list[nn.Module] = []
+        encoder_names: list[str] = []
+        for attr in ModuleDiscovery.ENCODER_ATTRS:
+            if hasattr(pipeline, attr) and getattr(pipeline, attr) is not None:
+                encoders.append(getattr(pipeline, attr))
+                encoder_names.append(attr)
+
+        # Collect VAE
+        vae = None
+        for attr in ModuleDiscovery.VAE_ATTRS:
+            module = getattr(pipeline, attr, None)
+            if module is not None:
+                vae = module
+                break
+
+        return PipelineModules(
+            dits=dit_modules,
+            dit_names=dit_names,
+            encoders=encoders,
+            encoder_names=encoder_names,
+            vae=vae,
+        )
+
+
+class OffloadBackend(ABC):
+    """Base class for CPU offload backends.
+
+    Follows the same pattern as CacheBackend for consistency across
+    optimization features in vLLM-Omni.
+    """
+
+    def __init__(self, config: OffloadConfig, device: torch.device):
+        """Initialize backend with configuration and target device.
+
+        Args:
+            config: OffloadConfig with strategy settings
+            device: Target GPU device for online modules
+        """
+        self.config = config
+        self.device = device
+        self.enabled = False
+
+    @abstractmethod
+    def enable(self, pipeline: nn.Module) -> None:
+        """Enable offloading on the pipeline.
+
+        Discovers modules, moves them to appropriate devices, and
+        registers forward hooks for swapping/prefetching.
+
+        Args:
+            pipeline: Diffusion pipeline model (e.g., Wan22Pipeline)
+        """
+        raise NotImplementedError("Subclasses must implement enable()")
+
+    @abstractmethod
+    def disable(self) -> None:
+        """Disable offloading and cleanup resources.
+
+        Removes all registered hooks. Does NOT move modules back to
+        original devices (caller responsible for that).
+        """
+        raise NotImplementedError("Subclasses must implement disable()")
+
+    def is_enabled(self) -> bool:
+        """Check if offloading is currently active."""
+        return self.enabled
 
 
 class SequentialOffloader:
@@ -388,148 +563,391 @@ class LayerwiseOffloader:
         return list(_blocks)
 
 
-def apply_offload_hooks(
-    model: nn.Module,
-    od_config: OmniDiffusionConfig,
-    *,
-    device: torch.device | None = None,
-) -> None:
-    """Apply mutual-exclusion offload hooks based on config.
+class ModelLevelOffloadBackend(OffloadBackend):
+    """Model-level (sequential) offloading backend.
 
-    When enable_cpu_offload is enabled, DiT and encoders swap GPU access:
-    - Encoders (text_encoder, text_encoder_2, text_encoder_3, image_encoder)
-      run on GPU while DiT is on CPU
-    - DiT runs on GPU while encoders are on CPU
-
-    Args:
-        model: Diffusion pipeline model
-        od_config: OmniDiffusionConfig with offload settings
+    Implements mutual-exclusion offloading between DiT transformers and encoders.
+    When encoders run, DiT is on CPU. When DiT runs, encoders are on CPU.
+    This allows running large models that don't fit entirely on GPU.
     """
-    enable_cpu_offload = getattr(od_config, "enable_cpu_offload", False)
-    enable_layerwise_offload = getattr(od_config, "enable_layerwise_offload", False)
-    pin_cpu_memory = getattr(od_config, "pin_cpu_memory", True)
 
-    if not enable_cpu_offload and not enable_layerwise_offload:
-        return
-    if enable_cpu_offload and enable_layerwise_offload:
-        # NOTE: Model-wise and layerwise cpu offloading are not supported together at this moment,
-        # consider layerwise offloading has higher priority than model-wise offloading
-        enable_cpu_offload = False
-        logger.info(
-            "Model-wise and layer-wise CPU offloading are not supported together at this moment. "
-            "Automatically disabled model-wise offloading."
-        )
-    # For now, model-wise and layer-wise (block-wise) offloading
-    # are functioning as expected when cuda device is available
-    if not current_omni_platform.is_cuda() or current_omni_platform.get_device_count() < 1:
-        logger.info("CPU Offloading requires cuda devices available. Skipping for now...")
-        return
+    def __init__(self, config: OffloadConfig, device: torch.device):
+        """Initialize model-level offload backend.
 
-    # Find DiT/transformer modules
-    dit_modules: list[nn.Module] = []
-    dit_names: list[str] = []
-    candidate_attrs = ["transformer", "transformer_2", "dit"]
-    for attr in candidate_attrs:
-        if not hasattr(model, attr):
-            continue
-        module_obj = getattr(model, attr)
-        if module_obj is None:
-            continue
+        Args:
+            config: OffloadConfig with MODEL_LEVEL strategy
+            device: Target GPU device
+        """
+        super().__init__(config, device)
+        self._sequential_offloader: SequentialOffloader | None = None
 
-        assert isinstance(module_obj, nn.Module), f"Expected {attr} to be nn.Module, got {type(module_obj)!r}"
+    def enable(self, pipeline: nn.Module) -> None:
+        """Enable model-level offloading on pipeline.
 
-        if module_obj in dit_modules:
-            continue
+        Args:
+            pipeline: Diffusion pipeline model
+        """
+        if self.enabled:
+            logger.warning("ModelLevelOffloadBackend already enabled")
+            return
 
-        dit_modules.append(module_obj)
-        dit_names.append(attr)
+        # Discover modules
+        modules = ModuleDiscovery.discover(pipeline)
 
-    if not dit_modules:
-        logger.warning("enable_cpu_offload enabled but no transformer/dit/unet found")
-        return
-    if device is None:
-        try:
-            device = next(dit_modules[0].parameters()).device
-        except StopIteration:
+        if not modules.dits:
+            logger.warning("No DiT/transformer modules found, skipping model-level offloading")
+            return
+
+        if not modules.encoders:
+            logger.warning("No encoder modules found, skipping model-level offloading")
+            return
+
+        # Move encoders to GPU
+        for enc in modules.encoders:
+            enc.to(self.device)
+
+        # Move VAE to GPU if available
+        if modules.vae is not None:
             try:
-                device = current_omni_platform.get_torch_device()
-            except (NotImplementedError, AttributeError):
-                logger.error("Fail to get device of pipeline. Skipping applying offloading hooks")
-                return
+                modules.vae.to(self.device, non_blocking=True)
+            except Exception as exc:
+                logger.debug("Failed to move VAE to GPU: %s", exc)
 
-    # Collect all encoders
-    encoders: list[nn.Module] = []
-    encoder_names: list[str] = []
-    for attr in ["text_encoder", "text_encoder_2", "text_encoder_3", "image_encoder"]:
-        if hasattr(model, attr) and getattr(model, attr) is not None:
-            encoders.append(getattr(model, attr))
-            encoder_names.append(attr)
-    if not encoders and enable_cpu_offload:
-        logger.warning("enable_cpu_offload enabled but no encoders found")
-        return
-    for enc in encoders:
-        enc.to(device)
-
-    # Collect VAE
-    for name in ["vae"]:
-        module = getattr(model, name, None)
-        if module is None:
-            continue
-        try:
-            module.to(device, non_blocking=True)
-        except Exception as exc:
-            logger.debug("Failed to move %s to GPU: %s", name, exc)
-
-    if enable_cpu_offload:
         # Initial state: keep DiT modules on CPU (encoders typically run first)
-        for dit_mod in dit_modules:
+        for dit_mod in modules.dits:
             dit_mod.to("cpu")
 
         torch.cuda.empty_cache()
 
-        if pin_cpu_memory:
-            for dit_mod in dit_modules:
+        # Pin CPU memory if requested
+        if self.config.pin_cpu_memory:
+            for dit_mod in modules.dits:
                 for p in dit_mod.parameters():
                     if p.data.device.type == "cpu" and not p.data.is_pinned():
                         p.data = p.data.pin_memory()
 
         # Register sequential offload hooks
-        SequentialOffloader(dit_modules, encoders, device, pin_cpu_memory).register()
-        logger.info(
-            "CPU offload enabled: %s <-> %s (mutual exclusion)",
-            ", ".join(dit_names),
-            ", ".join(encoder_names),
+        self._sequential_offloader = SequentialOffloader(
+            modules.dits, modules.encoders, self.device, self.config.pin_cpu_memory
         )
-    elif enable_layerwise_offload:
-        logger.info(f"Applying offloading hooks on {dit_names}")
+        self._sequential_offloader.register()
 
-        for i, dit_module in enumerate(dit_modules):
-            logger.info(f"Applying hook on {dit_names[i]} ({dit_module.__class__.__name__})")
+        self.enabled = True
+
+        logger.info(
+            "Model-level offloading enabled: %s <-> %s (mutual exclusion)",
+            ", ".join(modules.dit_names),
+            ", ".join(modules.encoder_names),
+        )
+
+    def disable(self) -> None:
+        """Disable model-level offloading and cleanup hooks."""
+        if not self.enabled:
+            return
+
+        if self._sequential_offloader is not None:
+            self._sequential_offloader.remove()
+            self._sequential_offloader = None
+
+        self.enabled = False
+        logger.info("Model-level offloading disabled")
+
+
+class LayerWiseOffloadBackend(OffloadBackend):
+    """Layer-wise (block-level) offloading backend.
+
+    Implements sliding window offloading where only a small number of transformer
+    blocks reside on GPU at a time. Blocks are prefetched asynchronously while
+    previous blocks compute, and freed after use.
+    """
+
+    def __init__(self, config: OffloadConfig, device: torch.device):
+        """Initialize layer-wise offload backend.
+
+        Args:
+            config: OffloadConfig with LAYER_WISE strategy
+            device: Target GPU device
+        """
+        super().__init__(config, device)
+        self._layerwise_offloaders: list[LayerwiseOffloader] = []
+
+    def enable(self, pipeline: nn.Module) -> None:
+        """Enable layer-wise offloading on pipeline.
+
+        Args:
+            pipeline: Diffusion pipeline model
+        """
+        if self.enabled:
+            logger.warning("LayerWiseOffloadBackend already enabled")
+            return
+
+        # Discover modules
+        modules = ModuleDiscovery.discover(pipeline)
+
+        if not modules.dits:
+            logger.warning("No DiT/transformer modules found, skipping layer-wise offloading")
+            return
+
+        # Move encoders to GPU (they stay resident)
+        for enc in modules.encoders:
+            enc.to(self.device)
+
+        # Move VAE to GPU if available
+        if modules.vae is not None:
+            try:
+                modules.vae.to(self.device, non_blocking=True)
+            except Exception as exc:
+                logger.debug("Failed to move VAE to GPU: %s", exc)
+
+        logger.info("Applying layer-wise offloading on %s", modules.dit_names)
+
+        # Setup layer-wise offloading for each DiT
+        for i, dit_module in enumerate(modules.dits):
+            dit_name = modules.dit_names[i]
+            logger.info(f"Applying hooks on {dit_name} ({dit_module.__class__.__name__})")
+
             blocks_attr_name = LayerwiseOffloader.get_blocks_attr_name(dit_module)
             blocks = LayerwiseOffloader.get_blocks_from_dit(dit_module)
 
             if not blocks_attr_name or not blocks:
                 logger.warning(
-                    "Target layers (blocks) are not found. "
-                    f"Skipping offloading on {dit_names[i]} ({dit_module.__class__.__name__})"
+                    "Target layers (blocks) not found. Skipping offloading on %s (%s)",
+                    dit_name,
+                    dit_module.__class__.__name__,
                 )
                 continue
 
-            # move modules other than blocks to gpu and keep them on gpu
+            # Move non-block modules to GPU (they stay resident)
             for name, m in dit_module.named_children():
-                # Skip the blocks module (layers to be offloaded)
                 if name == blocks_attr_name:
-                    logger.debug(f"Skipped module {name}")
+                    logger.debug(f"Skipped blocks module {name}")
                     continue
+                m.to(self.device)
+                logger.debug(f"Moved {name} to device {self.device}")
 
-                m.to(device)
-                logger.debug(f"Moved {name} to device {device}")
+            # Create and register offloader
+            offloader = LayerwiseOffloader(
+                blocks, self.device, self.config.pin_cpu_memory, self.config.layerwise_num_gpu_layers
+            )
+            self._layerwise_offloaders.append(offloader)
 
-            # set to the module (transformer)
-            offloader = LayerwiseOffloader(blocks, device, pin_cpu_memory, od_config.layerwise_num_gpu_layers)
+            # Store reference on DiT module for compatibility
             setattr(dit_module, "_layerwise_offloader", offloader)
 
             logger.info(
-                f"Layerwise offloading enabled on {len(blocks)} layers (blocks), "
-                f"with {od_config.layerwise_num_gpu_layers} kept on device"
+                f"Layer-wise offloading enabled on {len(blocks)} layers (blocks), "
+                f"with {self.config.layerwise_num_gpu_layers} kept on device"
             )
+
+        if self._layerwise_offloaders:
+            self.enabled = True
+        else:
+            logger.warning("No layer-wise offloaders created, offloading not enabled")
+
+    def disable(self) -> None:
+        """Disable layer-wise offloading and cleanup hooks."""
+        if not self.enabled:
+            return
+
+        for offloader in self._layerwise_offloaders:
+            offloader.remove_all_hooks()
+
+        self._layerwise_offloaders.clear()
+        self.enabled = False
+        logger.info("Layer-wise offloading disabled")
+
+
+def get_offload_backend(
+    od_config: OmniDiffusionConfig,
+    device: torch.device | None = None,
+) -> OffloadBackend | None:
+    """Create appropriate offload backend based on configuration.
+
+    Args:
+        od_config: OmniDiffusionConfig with offload settings
+        device: Target device (auto-detected if None)
+
+    Returns:
+        OffloadBackend instance or None if offloading disabled
+
+    Example:
+        >>> backend = get_offload_backend(od_config, device=torch.device("cuda:0"))
+        >>> if backend:
+        ...     backend.enable(pipeline)
+    """
+    # Extract and validate configuration
+    config = OffloadConfig.from_od_config(od_config)
+
+    # Return None if no offloading requested
+    if config.strategy == OffloadStrategy.NONE:
+        return None
+
+    # Validate platform (CUDA required for now)
+    if not current_omni_platform.is_cuda() or current_omni_platform.get_device_count() < 1:
+        logger.warning("CPU offloading requires CUDA devices. Skipping offloading.")
+        return None
+
+    # Detect device if not provided
+    if device is None:
+        try:
+            device = current_omni_platform.get_torch_device()
+        except (NotImplementedError, AttributeError) as exc:
+            logger.error("Failed to detect device: %s. Skipping offloading.", exc)
+            return None
+
+    # Create appropriate backend
+    if config.strategy == OffloadStrategy.MODEL_LEVEL:
+        return ModelLevelOffloadBackend(config, device)
+    elif config.strategy == OffloadStrategy.LAYER_WISE:
+        return LayerWiseOffloadBackend(config, device)
+    else:
+        logger.error("Unknown offload strategy: %s", config.strategy)
+        return None
+
+
+# Legacy
+# def apply_offload_hooks(
+#     model: nn.Module,
+#     od_config: OmniDiffusionConfig,
+#     *,
+#     device: torch.device | None = None,
+# ) -> None:
+#     """Apply mutual-exclusion offload hooks based on config.
+
+#     When enable_cpu_offload is enabled, DiT and encoders swap GPU access:
+#     - Encoders (text_encoder, text_encoder_2, text_encoder_3, image_encoder)
+#       run on GPU while DiT is on CPU
+#     - DiT runs on GPU while encoders are on CPU
+
+#     Args:
+#         model: Diffusion pipeline model
+#         od_config: OmniDiffusionConfig with offload settings
+#     """
+#     enable_cpu_offload = getattr(od_config, "enable_cpu_offload", False)
+#     enable_layerwise_offload = getattr(od_config, "enable_layerwise_offload", False)
+#     pin_cpu_memory = getattr(od_config, "pin_cpu_memory", True)
+
+#     if not enable_cpu_offload and not enable_layerwise_offload:
+#         return
+#     if enable_cpu_offload and enable_layerwise_offload:
+#         # NOTE: Model-wise and layerwise cpu offloading are not supported together at this moment,
+#         # consider layerwise offloading has higher priority than model-wise offloading
+#         enable_cpu_offload = False
+#         logger.info(
+#             "Model-wise and layer-wise CPU offloading are not supported together at this moment. "
+#             "Automatically disabled model-wise offloading."
+#         )
+#     # For now, model-wise and layer-wise (block-wise) offloading
+#     # are functioning as expected when cuda device is available
+#     if not current_omni_platform.is_cuda() or current_omni_platform.get_device_count() < 1:
+#         logger.info("CPU Offloading requires cuda devices available. Skipping for now...")
+#         return
+
+#     # Find DiT/transformer modules
+#     dit_modules: list[nn.Module] = []
+#     dit_names: list[str] = []
+#     candidate_attrs = ["transformer", "transformer_2", "dit"]
+#     for attr in candidate_attrs:
+#         if not hasattr(model, attr):
+#             continue
+#         module_obj = getattr(model, attr)
+#         if module_obj is None:
+#             continue
+
+#         assert isinstance(module_obj, nn.Module), f"Expected {attr} to be nn.Module, got {type(module_obj)!r}"
+
+#         if module_obj in dit_modules:
+#             continue
+
+#         dit_modules.append(module_obj)
+#         dit_names.append(attr)
+
+#     if not dit_modules:
+#         logger.warning("enable_cpu_offload enabled but no transformer/dit/unet found")
+#         return
+#     if device is None:
+#         try:
+#             device = next(dit_modules[0].parameters()).device
+#         except StopIteration:
+#             try:
+#                 device = current_omni_platform.get_torch_device()
+#             except (NotImplementedError, AttributeError):
+#                 logger.error("Fail to get device of pipeline. Skipping applying offloading hooks")
+#                 return
+
+#     # Collect all encoders
+#     encoders: list[nn.Module] = []
+#     encoder_names: list[str] = []
+#     for attr in ["text_encoder", "text_encoder_2", "text_encoder_3", "image_encoder"]:
+#         if hasattr(model, attr) and getattr(model, attr) is not None:
+#             encoders.append(getattr(model, attr))
+#             encoder_names.append(attr)
+#     if not encoders and enable_cpu_offload:
+#         logger.warning("enable_cpu_offload enabled but no encoders found")
+#         return
+#     for enc in encoders:
+#         enc.to(device)
+
+#     # Collect VAE
+#     for name in ["vae"]:
+#         module = getattr(model, name, None)
+#         if module is None:
+#             continue
+#         try:
+#             module.to(device, non_blocking=True)
+#         except Exception as exc:
+#             logger.debug("Failed to move %s to GPU: %s", name, exc)
+
+#     if enable_cpu_offload:
+#         # Initial state: keep DiT modules on CPU (encoders typically run first)
+#         for dit_mod in dit_modules:
+#             dit_mod.to("cpu")
+
+#         torch.cuda.empty_cache()
+
+#         if pin_cpu_memory:
+#             for dit_mod in dit_modules:
+#                 for p in dit_mod.parameters():
+#                     if p.data.device.type == "cpu" and not p.data.is_pinned():
+#                         p.data = p.data.pin_memory()
+
+#         # Register sequential offload hooks
+#         SequentialOffloader(dit_modules, encoders, device, pin_cpu_memory).register()
+#         logger.info(
+#             "CPU offload enabled: %s <-> %s (mutual exclusion)",
+#             ", ".join(dit_names),
+#             ", ".join(encoder_names),
+#         )
+#     elif enable_layerwise_offload:
+#         logger.info(f"Applying offloading hooks on {dit_names}")
+
+#         for i, dit_module in enumerate(dit_modules):
+#             logger.info(f"Applying hook on {dit_names[i]} ({dit_module.__class__.__name__})")
+#             blocks_attr_name = LayerwiseOffloader.get_blocks_attr_name(dit_module)
+#             blocks = LayerwiseOffloader.get_blocks_from_dit(dit_module)
+
+#             if not blocks_attr_name or not blocks:
+#                 logger.warning(
+#                     "Target layers (blocks) are not found. "
+#                     f"Skipping offloading on {dit_names[i]} ({dit_module.__class__.__name__})"
+#                 )
+#                 continue
+
+#             # move modules other than blocks to gpu and keep them on gpu
+#             for name, m in dit_module.named_children():
+#                 # Skip the blocks module (layers to be offloaded)
+#                 if name == blocks_attr_name:
+#                     logger.debug(f"Skipped module {name}")
+#                     continue
+
+#                 m.to(device)
+#                 logger.debug(f"Moved {name} to device {device}")
+
+#             # set to the module (transformer)
+#             offloader = LayerwiseOffloader(blocks, device, pin_cpu_memory, od_config.layerwise_num_gpu_layers)
+#             setattr(dit_module, "_layerwise_offloader", offloader)
+
+#             logger.info(
+#                 f"Layerwise offloading enabled on {len(blocks)} layers (blocks), "
+#                 f"with {od_config.layerwise_num_gpu_layers} kept on device"
+#             )
