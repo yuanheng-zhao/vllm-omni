@@ -26,7 +26,7 @@ from vllm_omni.diffusion.compile import regionally_compile
 from vllm_omni.diffusion.data import DiffusionOutput, OmniDiffusionConfig
 from vllm_omni.diffusion.forward_context import set_forward_context
 from vllm_omni.diffusion.model_loader.diffusers_loader import DiffusersPipelineLoader
-from vllm_omni.diffusion.offload import get_offload_backend
+from vllm_omni.diffusion.offloader import get_offload_backend
 from vllm_omni.diffusion.request import OmniDiffusionRequest
 from vllm_omni.distributed.omni_connectors.kv_transfer_manager import OmniKVTransferManager
 from vllm_omni.platforms import current_omni_platform
@@ -110,6 +110,7 @@ class DiffusionModelRunner:
 
         # Apply CPU offloading
         self.offload_backend = get_offload_backend(self.od_config, device=self.device)
+        # logger.info(f" Offloader backend: {self.offload_backend.__class__.__name__}")
         if self.offload_backend is not None:
             self.offload_backend.enable(self.pipeline)
 
