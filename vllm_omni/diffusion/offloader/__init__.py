@@ -1,19 +1,15 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
-from typing import TYPE_CHECKING
-
 import torch
 from vllm.logger import init_logger
 
+from vllm_omni.diffusion.data import OmniDiffusionConfig
 from vllm_omni.platforms import current_omni_platform
 
 from .base import OffloadBackend, OffloadConfig, OffloadStrategy
 from .layerwise_backend import LayerWiseOffloadBackend
 from .sequential_backend import ModelLevelOffloadBackend
-
-if TYPE_CHECKING:
-    from vllm_omni.diffusion.data import OmniDiffusionConfig
 
 logger = init_logger(__name__)
 
