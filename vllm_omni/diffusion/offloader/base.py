@@ -4,14 +4,12 @@
 from abc import ABC, abstractmethod
 from dataclasses import dataclass
 from enum import Enum
-from typing import TYPE_CHECKING
 
 import torch
 from torch import nn
 from vllm.logger import init_logger
 
-if TYPE_CHECKING:
-    from vllm_omni.diffusion.data import OmniDiffusionConfig
+from vllm_omni.diffusion.data import OmniDiffusionConfig
 
 logger = init_logger(__name__)
 
