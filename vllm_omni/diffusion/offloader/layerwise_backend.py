@@ -176,7 +176,7 @@ class LayerwiseOffloadHook(ModelHook):
     def pre_forward(self, module: nn.Module, *args: Any, **kwargs: Any) -> tuple[tuple, dict]:
         self.prefetch_layer(non_blocking=True)
 
-        return super().pre_forward(module, args, kwargs)
+        return super().pre_forward(module, *args, **kwargs)
 
     def post_forward(self, module: nn.Module, output: Any) -> Any:
         self.offload_layer()
