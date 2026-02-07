@@ -9,7 +9,11 @@ from vllm_omni.platforms import current_omni_platform
 
 from .base import OffloadBackend, OffloadConfig, OffloadStrategy
 from .layerwise_backend import LayerWiseOffloadBackend
-from .sequential_backend import ModelLevelOffloadBackend
+from .sequential_backend import (
+    ModelLevelOffloadBackend,
+    apply_sequential_offload,
+    remove_sequential_offload,
+)
 
 logger = init_logger(__name__)
 
@@ -19,6 +23,8 @@ __all__ = [
     "OffloadStrategy",
     "LayerWiseOffloadBackend",
     "ModelLevelOffloadBackend",
+    "apply_sequential_offload",
+    "remove_sequential_offload",
     "get_offload_backend",
 ]
 
