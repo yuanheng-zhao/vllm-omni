@@ -9,7 +9,7 @@ from vllm_omni.diffusion.hooks import HookRegistry, ModelHook
 from vllm_omni.platforms import current_omni_platform
 
 from .base import OffloadBackend, OffloadConfig
-from .components import ModuleDiscovery
+from .module_collector import ModuleDiscovery
 
 logger = init_logger(__name__)
 
