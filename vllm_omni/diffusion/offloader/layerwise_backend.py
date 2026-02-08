@@ -44,8 +44,8 @@ class LayerwiseOffloadHook(ModelHook):
         # Per-block synchronization primitive: set after H2D copy completes.
         self._prefetch_done: torch.cuda.Event | None = None
 
-        self.block_parameters: dict[str, nn.Parameter] = {}
-        self.block_buffers: dict[str, torch.Tensor] = {}
+        self.next_block_parameters: dict[str, nn.Parameter] = {}
+        self.next_block_buffers: dict[str, torch.Tensor] = {}
         self.dtype_cpu_flattened_weights: dict[torch.dtype, torch.Tensor] = {}
         self.dtype_metadata: dict[torch.dtype, list[dict[str, Any]]] = {}
 
@@ -54,12 +54,15 @@ class LayerwiseOffloadHook(ModelHook):
         # the input module is kept intact
         module = super().initialize_hook(module)
 
-        self.block_parameters: dict[str, nn.Parameter] = dict(self.next_block.named_parameters())
-        self.block_buffers: dict[str, torch.Tensor] = dict(self.next_block.named_buffers())
+        self.block_parameters: dict[str, nn.Parameter] = dict(module.named_parameters())
+        self.block_buffers: dict[str, torch.Tensor] = dict(module.named_buffers())
+
+        self.next_block_parameters: dict[str, nn.Parameter] = dict(self.next_block.named_parameters())
+        self.next_block_buffers: dict[str, torch.Tensor] = dict(self.next_block.named_buffers())
 
         # Pre-allocate gpu tensors in a flattened way
         self.dtype_cpu_flattened_weights, self.dtype_metadata = LayerwiseOffloadHook._to_cpu(
-            self.block_parameters, self.block_buffers, self.device, self.pin_memory
+            self.next_block_parameters, self.next_block_buffers, self.device, self.pin_memory
         )
 
         return module
@@ -128,8 +131,8 @@ class LayerwiseOffloadHook(ModelHook):
         """
         self.copy_stream.wait_stream(torch.cuda.current_stream())
 
-        layer_params = self.block_parameters
-        layer_bufs = self.block_buffers
+        layer_params = self.next_block_parameters
+        layer_bufs = self.next_block_buffers
 
         evt = torch.cuda.Event()
         gpu_weights: dict[torch.dtype, torch.Tensor] = {}
@@ -143,7 +146,7 @@ class LayerwiseOffloadHook(ModelHook):
             evt.record(self.copy_stream)
 
         for dtype, ordered_metadata in self.dtype_metadata.items():
-            # ordered_metadata: list[dict[str, Any]] = self.dtype_metadata[dtype]
+            # ordered_metadata: list[dict[str, Any]]
             gpu_weight = gpu_weights[dtype]
 
             for metadata in ordered_metadata:
@@ -280,15 +283,15 @@ class LayerWiseOffloadBackend(OffloadBackend):
                 m.to(self.device)
                 logger.debug(f"Moved {name} to device {self.device}")
 
-            # Pre-fetch the first layer
+            # Pre-fetch the first layer by manually calling the hook function on the last layer;
             # For subsequent requests, the first layer/block will be pre-fetched
             # during the last layer compute of the previous request.
-            block0, block1 = blocks[0], blocks[1]
-            hook = apply_block_hook(block0, block1, self.device, self.copy_stream, self.config.pin_cpu_memory)
+            last_block, first_block = blocks[-1], blocks[0]
+            hook = apply_block_hook(last_block, first_block, self.device, self.copy_stream, self.config.pin_cpu_memory)
             hook.prefetch_layer(non_blocking=False)
 
             # Register hook for each of blocks
-            for i, block in enumerate(blocks[1:], start=1):
+            for i, block in enumerate(blocks[:-1]):
                 next_block = blocks[(i + 1) % num_blocks]
                 apply_block_hook(block, next_block, self.device, self.copy_stream, self.config.pin_cpu_memory)
 
