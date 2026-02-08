@@ -167,6 +167,8 @@ class LayerwiseOffloadHook(ModelHook):
         if evt is not None:
             torch.cuda.current_stream().wait_event(evt)
 
+        self._prefetch_done = None
+
         # free GPU residency
         for _, param in self.block_parameters.items():
             param.data = torch.empty((), device=self.device, dtype=param.dtype)
@@ -180,7 +182,6 @@ class LayerwiseOffloadHook(ModelHook):
 
     def post_forward(self, module: nn.Module, output: Any) -> Any:
         self.offload_layer()
-        self._prefetch_done = None
 
         return super().post_forward(module, output)
 
@@ -191,10 +192,12 @@ def apply_block_hook(
     device: torch.device,
     stream: torch.cuda.Stream | None = None,
     pin_memory: bool = True,
-) -> None:
+) -> LayerwiseOffloadHook:
     registry = HookRegistry.get_or_create(module)
     hook = LayerwiseOffloadHook(next_block, device, stream, pin_memory)
     registry.register_hook(LayerwiseOffloadHook._HOOK_NAME, hook)
+
+    return hook
 
 
 def remove_block_hook(module: nn.Module) -> None:
@@ -256,6 +259,17 @@ class LayerWiseOffloadBackend(OffloadBackend):
                     dit_name,
                     dit_module.__class__.__name__,
                 )
+                dit_module.to(self.device)
+                continue
+
+            num_blocks = len(blocks)
+            if num_blocks <= 1:
+                logger.warning(
+                    "#Target layers (blocks) <= 1. Skipping offloading on %s (%s)",
+                    dit_name,
+                    dit_module.__class__.__name__,
+                )
+                dit_module.to(self.device)
                 continue
 
             # Move non-block modules to GPU (they stay resident)
@@ -266,9 +280,15 @@ class LayerWiseOffloadBackend(OffloadBackend):
                 m.to(self.device)
                 logger.debug(f"Moved {name} to device {self.device}")
 
+            # Pre-fetch the first layer
+            # For subsequent requests, the first layer/block will be pre-fetched
+            # during the last layer compute of the previous request.
+            block0, block1 = blocks[0], blocks[1]
+            hook = apply_block_hook(block0, block1, self.device, self.copy_stream, self.config.pin_cpu_memory)
+            hook.prefetch_layer(non_blocking=False)
+
             # Register hook for each of blocks
-            num_blocks = len(blocks)
-            for i, block in enumerate(blocks):
+            for i, block in enumerate(blocks[1:], start=1):
                 next_block = blocks[(i + 1) % num_blocks]
                 apply_block_hook(block, next_block, self.device, self.copy_stream, self.config.pin_cpu_memory)
 
