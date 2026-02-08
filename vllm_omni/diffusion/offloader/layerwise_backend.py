@@ -302,10 +302,7 @@ class LayerWiseOffloadBackend(OffloadBackend):
                 next_block = blocks[(i + 1) % num_blocks]
                 apply_block_hook(block, next_block, self.device, self.copy_stream, self.config.pin_cpu_memory)
 
-            logger.info(
-                f"Layer-wise offloading enabled on {num_blocks} layers (blocks), "
-                f"with {self.config.layerwise_num_gpu_layers} kept on device"
-            )
+            logger.info(f"Layer-wise offloading enabled on {num_blocks} layers (blocks)")
 
             # Track hooked blocks for cleanup
             self._blocks.append(blocks)

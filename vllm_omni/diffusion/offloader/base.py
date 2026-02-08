@@ -24,7 +24,6 @@ class OffloadStrategy(Enum):
 class OffloadConfig:
     strategy: OffloadStrategy
     pin_cpu_memory: bool = True
-    layerwise_num_gpu_layers: int = 1
 
     @classmethod
     def from_od_config(cls, od_config: OmniDiffusionConfig) -> "OffloadConfig":
@@ -42,7 +41,6 @@ class OffloadConfig:
         enable_cpu_offload = getattr(od_config, "enable_cpu_offload", False)
         enable_layerwise_offload = getattr(od_config, "enable_layerwise_offload", False)
         pin_cpu_memory = getattr(od_config, "pin_cpu_memory", True)
-        layerwise_num_gpu_layers = getattr(od_config, "layerwise_num_gpu_layers", 1)
 
         # Determine strategy (mutual exclusion, layer-wise takes priority)
         if enable_layerwise_offload:
@@ -60,7 +58,6 @@ class OffloadConfig:
         return cls(
             strategy=strategy,
             pin_cpu_memory=pin_cpu_memory,
-            layerwise_num_gpu_layers=layerwise_num_gpu_layers,
         )
 
 
