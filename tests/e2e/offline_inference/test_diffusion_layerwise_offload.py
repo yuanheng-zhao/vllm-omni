@@ -17,7 +17,10 @@ if str(REPO_ROOT) not in sys.path:
 from vllm_omni import Omni
 
 # Models to test and expected saved memory in MB, correspondingly
-MODELS_SAVED_MEMORY_MB = {"riverclouds/qwen_image_random": 4500}
+MODELS_SAVED_MEMORY_MB = {
+    "riverclouds/qwen_image_random": 4500,
+    # "Wan-AI/Wan2.2-T2V-A14B-Diffusers": 45000,
+}
 
 
 def run_inference(

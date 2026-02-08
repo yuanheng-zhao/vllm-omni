@@ -15,8 +15,9 @@ logger = init_logger(__name__)
 
 
 class SequentialOffloadHook(ModelHook):
-    """Hook for sequential offloading with mutual exclusion.
+    """Hook for sequential offloading with mutual exclusion on encoder and DiT modules.
 
+    To be used as a model-level (or "component-level") of CPU offloading method;
     When a module's forward is called, this hook offloads target modules to CPU
     and loads the current module to GPU.
     """
@@ -46,7 +47,7 @@ class SequentialOffloadHook(ModelHook):
         if previous_device.type == "cpu":
             return
 
-        module.to("cpu", non_blocking=True)
+        module.to("cpu")
         torch.cuda.empty_cache()
 
         if self.pin_memory:
@@ -63,7 +64,7 @@ class SequentialOffloadHook(ModelHook):
         except StopIteration:
             return
 
-        module.to(self.device, non_blocking=True)
+        module.to(self.device)
 
     def pre_forward(self, module: nn.Module, *args, **kwargs) -> tuple[tuple, dict]:
         # Offload target modules to CPU
@@ -72,7 +73,6 @@ class SequentialOffloadHook(ModelHook):
 
         # Load current module to GPU
         self._to_gpu(module)
-
         current_omni_platform.synchronize()
 
         logger.debug(

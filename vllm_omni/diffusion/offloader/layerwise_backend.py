@@ -20,6 +20,13 @@ logger = init_logger(__name__)
 class LayerwiseOffloadHook(ModelHook):
     """Hook for layerwise (transformer-block-wise) CPU offloading.
 
+    The hook instance retains parameters for both the current registered block
+    module and those for the next block, as well as flattened CPU tensors which
+    record the parameters of the current block module, so that these parameters
+    could be re-materialized on device in an overlapping way.
+    This hook should be registered to each of the transformer blocks in DiT
+    module(s) of the target pipeline.
+
     Based on implementations from:
     https://github.com/sgl-project/sglang/blob/v0.5.8/python/sglang/multimodal_gen/runtime/utils/layerwise_offload.py
     """
@@ -181,12 +188,12 @@ class LayerwiseOffloadHook(ModelHook):
     def pre_forward(self, module: nn.Module, *args: Any, **kwargs: Any) -> tuple[tuple, dict]:
         self.prefetch_layer(non_blocking=True)
 
-        return super().pre_forward(module, *args, **kwargs)
+        return args, kwargs
 
     def post_forward(self, module: nn.Module, output: Any) -> Any:
         self.offload_layer()
 
-        return super().post_forward(module, output)
+        return output
 
 
 def apply_block_hook(
