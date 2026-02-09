@@ -110,8 +110,8 @@ class DiffusionModelRunner:
 
         # Apply CPU offloading
         self.offload_backend = get_offload_backend(self.od_config, device=self.device)
-        # logger.info(f" Offloader backend: {self.offload_backend.__class__.__name__}")
         if self.offload_backend is not None:
+            logger.info(f" Enabling offloader backend: {self.offload_backend.__class__.__name__}")
             self.offload_backend.enable(self.pipeline)
 
         # Apply torch.compile if not in eager mode
