@@ -83,7 +83,7 @@ vllm-omni serve diffusion Wan-AI/Wan2.2-T2V-A14B-Diffusers --enable-layerwise-of
 vllm-omni serve diffusion Wan-AI/Wan2.2-I2V-A14B-Diffusers --enable-layerwise-offload
 ```
 
-### Model Support
+### To Support a Model
 
 Models must define the blocks attribute name for layerwise offloading:
 
@@ -95,14 +95,6 @@ class WanTransformer3DModel(nn.Module):
         self.blocks = nn.ModuleList([...])  # Transformer blocks
 ```
 
-Supported models:
-
-| Architecture | Example Models | DiT Class | Blocks Attr |
-|--------------|----------------|-----------|-------------|
-| Wan22Pipeline | `Wan-AI/Wan2.2-T2V-A14B-Diffusers` | `WanTransformer3DModel` | `"blocks"` |
-| Wan22I2VPipeline | `Wan-AI/Wan2.2-I2V-A14B-Diffusers` | `WanTransformer3DModel` | `"blocks"` |
-| QwenImagePipeline | `Qwen/Qwen-Image` | `QwenImageTransformer2DModel` | `"transformer_blocks"` |
-
 ### Limitations
 - Cold start latency increases because of
     1) components are loaded to CPU first at the very first during initialization,
@@ -111,9 +103,9 @@ Supported models:
 - Support single GPU only for now
 
 
-## Implementation Notes
+### Implementation Notes
 
-### Module Discovery
+**Module Discovery**
 
 The offloader automatically discovers pipeline components:
 
@@ -121,11 +113,11 @@ The offloader automatically discovers pipeline components:
 - **Encoders**: `text_encoder`, `text_encoder_2`, `text_encoder_3`, `image_encoder`
 - **VAE**: `vae`
 
-### Hook System
+**Hook System**
 
 Both strategies use vLLM-Omni's hook registry system (`HookRegistry` and `ModelHook`) to register pre/post forward callbacks on modules, enabling automatic swapping without modifying model code.
 
-### Backend Architecture
+**Backend Architecture**
 
 ```
 OffloadBackend (base class)
@@ -134,3 +126,16 @@ OffloadBackend (base class)
 ```
 
 Factory function `get_offload_backend()` selects the appropriate backend based on configuration.
+
+
+## Supported Models
+
+| Architecture | Example Models | DiT Class | Model-Level Offload | Layerwise Offload | Blocks Attr (Layerwise specific) |
+|--------------|----------------|-----------|---------------------|-------------------|-------------|
+| Wan22Pipeline | `Wan-AI/Wan2.2-T2V-A14B-Diffusers` | `WanTransformer3DModel` | ✓ | ✓ | `"blocks"` |
+| Wan22I2VPipeline | `Wan-AI/Wan2.2-I2V-A14B-Diffusers` | `WanTransformer3DModel` | ✓ | ✓ | `"blocks"` |
+| QwenImagePipeline | `Qwen/Qwen-Image` | `QwenImageTransformer2DModel` | ✓ | ✓ | `"transformer_blocks"` |
+
+**Notes:**
+- Model-Level Offloading is expected to be supported by all common diffusion models (DiT and encoders) naturally
+- Layerwise Offloading requires DiT class to define `_layerwise_offload_blocks_attr` pointing to transformer blocks
