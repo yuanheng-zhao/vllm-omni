@@ -126,6 +126,7 @@ class TestOmniRequestOutput:
         mock_request_output = mocker.Mock()
         mock_audio = mocker.Mock()
         expected_output = {"audio": mock_audio}
+        mock_request_output.outputs = []
         mock_request_output.multimodal_output = expected_output
 
         output = OmniRequestOutput.from_pipeline(
