@@ -9,6 +9,8 @@ from vllm_omni.distributed.omni_connectors.connectors.shm_connector import Share
 from vllm_omni.distributed.omni_connectors.utils.config import ConnectorSpec, OmniTransferConfig
 from vllm_omni.distributed.omni_connectors.utils.initialization import get_connectors_config_for_stage
 
+pytestmark = [pytest.mark.core_model, pytest.mark.cpu]
+
 
 @pytest.fixture
 def mock_objects(mocker: MockerFixture):

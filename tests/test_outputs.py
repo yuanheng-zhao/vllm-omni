@@ -2,10 +2,13 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 """Tests for OmniRequestOutput class."""
 
+import pytest
 from PIL import Image
 from pytest_mock import MockerFixture
 
 from vllm_omni.outputs import OmniRequestOutput
+
+pytestmark = [pytest.mark.core_model, pytest.mark.cpu]
 
 
 class TestOmniRequestOutput:

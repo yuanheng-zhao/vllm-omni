@@ -5,6 +5,8 @@ import os
 import pytest
 from pytest_mock import MockerFixture
 
+pytestmark = [pytest.mark.core_model, pytest.mark.cpu]
+
 
 class TestParseCudaVisibleDevices:
     def test_empty(self, mocker: MockerFixture):
