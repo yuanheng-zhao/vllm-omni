@@ -143,8 +143,8 @@ def ovis_pipeline(mocker: MockerFixture, mock_dependencies, monkeypatch: pytest.
 
     # Initialize pipeline
     # We use a dummy model path check override
-    with mocker.patch("os.path.exists", return_value=True):
-        pipeline = OvisImagePipeline(od_config=od_config)
+    mocker.patch("os.path.exists", return_value=True)
+    pipeline = OvisImagePipeline(od_config=od_config)
 
     return pipeline
 
@@ -251,38 +251,38 @@ def test_real_transformer_init_and_forward(mocker: MockerFixture):
     mock_group.rank_in_group = 0
     mock_group.world_size = 1
 
-    with mocker.patch("vllm.distributed.parallel_state.get_tp_group", return_value=mock_group):
-        # Initialize real model
-        model = OvisImageTransformer2DModel(
-            od_config=od_config,
-            patch_size=1,
-            in_channels=16,
-            out_channels=16,
-            num_single_layers=1,
-            attention_head_dim=8,
-            num_attention_heads=2,
-            joint_attention_dim=32,
-            axes_dims_rope=(2, 2, 4),
-        ).to(device)
+    mocker.patch("vllm.distributed.parallel_state.get_tp_group", return_value=mock_group)
+    # Initialize real model
+    model = OvisImageTransformer2DModel(
+        od_config=od_config,
+        patch_size=1,
+        in_channels=16,
+        out_channels=16,
+        num_single_layers=1,
+        attention_head_dim=8,
+        num_attention_heads=2,
+        joint_attention_dim=32,
+        axes_dims_rope=(2, 2, 4),
+    ).to(device)
 
-        # Create dummy inputs
-        B, Seq, C = 1, 16, 16
-        hidden_states = torch.randn(B, Seq, C, device=device)
-        encoder_hidden_states = torch.randn(B, 10, 32, device=device)  # joint_attention_dim=32
-        timestep = torch.tensor([1], device=device)
-        img_ids = torch.zeros(Seq, 3, device=device)
-        txt_ids = torch.zeros(10, 3, device=device)
+    # Create dummy inputs
+    B, Seq, C = 1, 16, 16
+    hidden_states = torch.randn(B, Seq, C, device=device)
+    encoder_hidden_states = torch.randn(B, 10, 32, device=device)  # joint_attention_dim=32
+    timestep = torch.tensor([1], device=device)
+    img_ids = torch.zeros(Seq, 3, device=device)
+    txt_ids = torch.zeros(10, 3, device=device)
 
-        # Run forward
-        output = model(
-            hidden_states=hidden_states,
-            encoder_hidden_states=encoder_hidden_states,
-            timestep=timestep,
-            img_ids=img_ids,
-            txt_ids=txt_ids,
-            return_dict=False,
-        )
+    # Run forward
+    output = model(
+        hidden_states=hidden_states,
+        encoder_hidden_states=encoder_hidden_states,
+        timestep=timestep,
+        img_ids=img_ids,
+        txt_ids=txt_ids,
+        return_dict=False,
+    )
 
-        assert output is not None
-        assert isinstance(output, tuple)
-        assert output[0].shape == hidden_states.shape
+    assert output is not None
+    assert isinstance(output, tuple)
+    assert output[0].shape == hidden_states.shape
