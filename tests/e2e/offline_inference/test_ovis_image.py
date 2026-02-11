@@ -16,6 +16,7 @@ import pytest
 import torch
 from pytest_mock import MockerFixture
 
+from tests.utils import hardware_test
 from vllm_omni.diffusion.data import OmniDiffusionConfig, TransformerConfig
 
 # Mock the OvisImageTransformer2DModel to avoid complex init if needed,
@@ -222,6 +223,9 @@ def test_resolution_check(ovis_pipeline):
     assert output is not None
 
 
+@pytest.mark.core_model
+@pytest.mark.diffusion
+@hardware_test(res={"cuda": "L4", "rocm": "MI325"})
 def test_real_transformer_init_and_forward(mocker: MockerFixture):
     """Test the real OvisImageTransformer2DModel initialization and forward pass for coverage."""
 
