@@ -61,6 +61,8 @@ As each block completes, the next block is prefetched to GPU while the current b
 
 Each transformer block has a `LayerwiseOffloadHook` that prefetches the next block before forward and frees the current block after forward.
 
+Layerwise offloading is primarily recommended for large **video generation models** where the compute cost per block is high enough to effectively overlap with memory prefetch operations. For example, Wan2.2 T2V and I2V pipelines.
+
 ### Usage
 
 **Python API:**

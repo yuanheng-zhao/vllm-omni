@@ -791,7 +791,7 @@ class WanTransformer3DModel(nn.Module):
         self.blocks = nn.ModuleList([...])  # Transformer blocks
 ```
 
-**Note:** Layerwise offloading is primarily recommended for **video generation models** where the compute cost per block is high enough to effectively overlap with memory prefetch operations.
+**Note:** Layerwise offloading is primarily recommended for large **video generation models** where the compute cost per block is high enough to effectively overlap with memory prefetch operations.
 
 
 ---
