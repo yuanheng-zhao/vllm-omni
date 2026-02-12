@@ -132,7 +132,7 @@ def parse_args() -> argparse.Namespace:
         "Example: --ignored-layers 'add_kv_proj,to_add_out'",
     )
     parser.add_argument(
-        "--vae_use_slicing",
+        "--vae-use-slicing",
         action="store_true",
         help="Enable VAE slicing for memory optimization.",
     )
