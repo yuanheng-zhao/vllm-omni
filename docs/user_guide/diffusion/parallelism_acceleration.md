@@ -30,7 +30,7 @@ The following table shows which models are currently supported by parallelism me
 | **Qwen-Image-Edit-2509** | `Qwen/Qwen-Image-Edit-2509`          |     ✅      |    ✅    |      ✅       |        ✅        |         ❌          |
 | **Qwen-Image-Layered**   | `Qwen/Qwen-Image-Layered`            |     ✅      |    ✅    |      ✅       |        ✅        |         ❌          |
 | **Z-Image**              | `Tongyi-MAI/Z-Image-Turbo`           |     ✅      |    ✅    |      ❌       |  ✅ (TP=2 only)  |         ✅          |
-| **Stable-Diffusion3.5**  | `stabilityai/stable-diffusion-3.5`   |     ❌      |    ❌    |      ❌       |        ❌        |         ❌          |
+| **Stable-Diffusion3.5**  | `stabilityai/stable-diffusion-3.5`   |     ❌      |    ❌    |      ❌       |        ✅        |         ❌          |
 | **FLUX.2-klein**         | `black-forest-labs/FLUX.2-klein-4B`  |     ❌      |    ❌    |      ❌       |        ✅        |         ❌          |
 | **FLUX.1-dev**           | `black-forest-labs/FLUX.1-dev`       |     ❌      |    ❌    |      ✅       |        ✅        |         ❌          |
 
@@ -317,10 +317,10 @@ python image_edit.py \
   --model "Qwen/Qwen-Image-Edit" \
   --image "qwen_image_output.png" \
   --prompt "turn this cat to a dog" \
-  --negative_prompt "low quality, blurry" \
-  --cfg_scale 4.0 \
+  --negative-prompt "low quality, blurry" \
+  --cfg-scale 4.0 \
   --output "edited_image.png" \
-  --cfg_parallel_size 2
+  --cfg-parallel-size 2
 ```
 
 #### Online Serving
