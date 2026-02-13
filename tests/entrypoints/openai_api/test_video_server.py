@@ -17,6 +17,8 @@ from vllm_omni.entrypoints.openai.api_server import router
 from vllm_omni.entrypoints.openai.protocol.videos import VideoGenerationRequest, VideoResponseFormat
 from vllm_omni.entrypoints.openai.serving_video import OmniOpenAIServingVideo
 
+pytestmark = [pytest.mark.core_model, pytest.mark.cpu]
+
 
 class MockVideoResult:
     def __init__(self, videos):

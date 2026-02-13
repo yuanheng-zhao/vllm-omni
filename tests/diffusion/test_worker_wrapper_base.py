@@ -23,6 +23,9 @@ from vllm_omni.diffusion.worker.diffusion_worker import (
     WorkerWrapperBase,
 )
 
+pytestmark = [pytest.mark.core_model, pytest.mark.diffusion, pytest.mark.cpu]
+
+
 # -------------------------------------------------------------------------
 # Fixtures
 # -------------------------------------------------------------------------
