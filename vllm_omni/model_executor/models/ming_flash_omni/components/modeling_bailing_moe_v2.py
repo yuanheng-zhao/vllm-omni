@@ -22,7 +22,6 @@
 # limitations under the License.
 
 from collections.abc import Iterable
-from typing import Optional
 
 import torch
 from torch import nn
@@ -258,7 +257,7 @@ def get_t_scale_rope_index(
     attention_mask: torch.Tensor | None = None,
     scale_factor: float = 1.0,
     second_per_grid_ts: torch.Tensor | None = None,
-    use_interleaved_frame_timestamp: Optional = True,
+    use_interleaved_frame_timestamp: bool = True,
 ) -> tuple[torch.Tensor, torch.Tensor]:
     spatial_merge_size = config.spatial_merge_size
     image_token_id = config.image_patch_token
@@ -415,7 +414,7 @@ def get_rope_index(
     video_grid_thw: torch.LongTensor | None = None,
     attention_mask: torch.Tensor | None = None,
     second_per_grid_ts: torch.Tensor | None = None,
-    use_interleaved_frame_timestamp: Optional = True,
+    use_interleaved_frame_timestamp: bool = True,
 ) -> tuple[torch.Tensor, torch.Tensor]:
     """Calculate 3D rope index for multimodal inputs."""
     spatial_merge_size = config.spatial_merge_size
@@ -1277,7 +1276,6 @@ class BailingMoeV2Model(nn.Module):
                         query_embeds_audio,
                         query_embeds_audio_lengths,
                         placeholder_audio_loc_lens,
-                        None,
                     )
             residual = None
         else:
