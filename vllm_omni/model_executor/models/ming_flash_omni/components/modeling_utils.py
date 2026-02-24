@@ -182,13 +182,13 @@ def encode_audio_segments(
 
     Audio features arrive in "wrapped" format (multiple segments concatenated
     per batch row). This function:
-      1. Unwraps segments into individual rows
-      2. Runs the Whisper encoder on each segment
+      1. Unwraps segments into list of individual mel spectrograms
+      2. Runs the Whisper encoder with packed sequence format
       3. Projects through the audio projection layer
       4. Wraps results back into batch format
 
     Args:
-        encoder: WhisperAudioEncoder instance.
+        encoder: WhisperAudioEncoder instance (with packed sequence support).
         proj_layer: Audio projection module (Conv1d + MLP).
         wav_feats: [B, L_total, n_mels] wrapped mel features.
         wav_feats_lengths: [B, N] lengths of each segment.
@@ -200,29 +200,61 @@ def encode_audio_segments(
         - audio_feats: [B, L_enc, D] encoder features in wrapped format
         - audio_feats_lengths: [B, N] output lengths per segment
     """
-    # Unwrap: separate concatenated segments into individual rows
-    feat_segs_batch, feat_seg_lengths = unwrap_feats(wav_feats, wav_feats_lengths)
+    # Unwrap into list of mel spectrograms
+    x_list = []
+    audio_lens = []
+    for i in range(wav_feats_lengths.shape[0]):
+        feat_index = 0
+        for j in range(wav_feats_lengths.shape[1]):
+            feat_len = int(wav_feats_lengths[i, j].item())
+            if feat_len == 0:
+                break
+            # Extract segment and transpose to [n_mels, T]
+            mel_seg = wav_feats[i, feat_index : feat_index + feat_len].transpose(0, 1)
+            x_list.append(mel_seg)
+            audio_lens.append(feat_len)
+            feat_index += feat_len
 
-    # Encode with Whisper
-    audio_feats_seg = encoder(feat_segs_batch)
+    # Encode with Whisper (returns packed format)
+    audio_feats_packed = encoder(x_list, audio_lens)
 
-    # Project: Conv1d expects [B, C, T] format
-    audio_feats_seg_proj = proj_layer(audio_feats_seg.transpose(-1, -2)).transpose(-1, -2)
-
-    # Compute output lengths after Whisper conv and projector conv
-    feat_seg_lengths = feat_seg_lengths.to(feat_segs_batch.device)
+    # Compute output lengths after Whisper conv
     # Whisper encoder conv: kernel=3, stride=2, padding=1
-    audio_feat_seg_lengths = (feat_seg_lengths - 3 + 2 * 1) // 2 + 1
-    # Projector conv
-    audio_feat_seg_lengths = (
-        audio_feat_seg_lengths - audio_config.ds_kernel_size + 2 * (audio_config.ds_kernel_size // 2)
-    ) // audio_config.ds_stride + 1
+    audio_feat_lens_after_enc = [(length - 3 + 2 * 1) // 2 + 1 for length in audio_lens]
 
-    # Wrap back into batch format
-    audio_feats, _, audio_feats_lengths = wrap_feats(audio_feats_seg, wav_feats_lengths, audio_feat_seg_lengths)
-    audio_feats_proj, _, audio_feats_lengths2 = wrap_feats(
-        audio_feats_seg_proj, wav_feats_lengths, audio_feat_seg_lengths
+    # Unpack encoder output back to list
+    audio_feats_list = []
+    start_idx = 0
+    for enc_len in audio_feat_lens_after_enc:
+        audio_feats_list.append(audio_feats_packed[start_idx : start_idx + enc_len])
+        start_idx += enc_len
+
+    # Apply projection to each segment
+    audio_feats_proj_list = []
+    audio_feat_lens_after_proj = []
+    for audio_feat in audio_feats_list:
+        # Project: Conv1d expects [1, D, T] format
+        audio_feat_proj = proj_layer(audio_feat.T.unsqueeze(0)).squeeze(0).T
+        audio_feats_proj_list.append(audio_feat_proj)
+
+        # Compute output length after projector conv
+        enc_len = audio_feat.shape[0]
+        proj_len = (
+            enc_len - audio_config.ds_kernel_size + 2 * (audio_config.ds_kernel_size // 2)
+        ) // audio_config.ds_stride + 1
+        audio_feat_lens_after_proj.append(proj_len)
+
+    # Wrap results back into batch format
+    # Convert lists to tensors for wrap_feats
+    audio_feats_proj_stacked = torch.nn.utils.rnn.pad_sequence(audio_feats_proj_list, batch_first=True)
+    audio_feats_stacked = torch.nn.utils.rnn.pad_sequence(audio_feats_list, batch_first=True)
+    audio_feat_lens_tensor = torch.tensor(audio_feat_lens_after_proj, dtype=torch.long, device=wav_feats.device)
+
+    # Wrap back into original batch structure
+    audio_feats_proj, _, audio_feats_lengths = wrap_feats(
+        audio_feats_proj_stacked, wav_feats_lengths, audio_feat_lens_tensor
     )
+    audio_feats, _, audio_feats_lengths2 = wrap_feats(audio_feats_stacked, wav_feats_lengths, audio_feat_lens_tensor)
     assert torch.all(audio_feats_lengths == audio_feats_lengths2)
 
     return audio_feats_proj, audio_feats, audio_feats_lengths
