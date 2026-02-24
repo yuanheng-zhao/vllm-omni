@@ -1,5 +1,18 @@
 # SPDX-License-Identifier: Apache-2.0
 # Copyright 2025 The vLLM-Omni team.
+# Copyright 2025 The Qwen Team and The HuggingFace Inc. team. All rights reserved.
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+#     http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
 # Adapted from Ming repository qwen3_moe_vit.py
 # https://github.com/inclusionAI/Ming
 
@@ -27,17 +40,9 @@ from vllm.model_executor.layers.quantization import QuantizationConfig
 from vllm.model_executor.models.qwen3_omni_moe_thinker import (
     Qwen3Omni_VisionTransformer,
 )
+from vllm.model_executor.models.utils import WeightsMapper
 
 logger = init_logger(__name__)
-
-# Weight name mapping from Ming HF checkpoint names to vLLM parameter names.
-# Applied during load_weights() to translate checkpoint keys.
-_MING_TO_VLLM_VISION_WEIGHT_MAP = {
-    "deepstack_merger_list.": "merger_list.",
-    "merger.norm.": "merger.ln_q.",
-    "merger.linear_fc1.": "merger.mlp.0.",
-    "merger.linear_fc2.": "merger.mlp.2.",
-}
 
 
 def _adapt_vision_config(vision_config):
@@ -64,11 +69,22 @@ def _adapt_vision_config(vision_config):
 
 
 class MingVisionEncoder(nn.Module):
-    """Wrapper around vLLM's Qwen3Omni_VisionTransformer for Ming.
+    """**Wrapper** around vLLM's Qwen3Omni_VisionTransformer for Ming.
 
     Handles config adaptation and weight name remapping so that Ming's HF
     checkpoint weights can be loaded directly into vLLM's TP-aware ViT.
     """
+
+    # Weight name mapping from Ming HF checkpoint names to vLLM parameter names.
+    # Applied during load_weights() to translate checkpoint keys.
+    hf_to_vllm_mapper = WeightsMapper(
+        orig_to_new_substr={
+            "deepstack_merger_list.": "merger_list.",
+            "merger.norm.": "merger.ln_q.",
+            "merger.linear_fc1.": "merger.mlp.0.",
+            "merger.linear_fc2.": "merger.mlp.2.",
+        }
+    )
 
     def __init__(
         self,
@@ -117,14 +133,5 @@ class MingVisionEncoder(nn.Module):
         return self.encoder(pixel_values, grid_thw=grid_thw)
 
     def load_weights(self, weights: Iterable[tuple[str, torch.Tensor]]) -> set[str]:
-        """Load weights with Ming→vLLM name remapping."""
-
-        def _remap(name: str) -> str:
-            for ming_key, vllm_key in _MING_TO_VLLM_VISION_WEIGHT_MAP.items():
-                if ming_key in name:
-                    name = name.replace(ming_key, vllm_key)
-                    break
-            return name
-
-        remapped_weights = ((_remap(name), weight) for name, weight in weights)
+        remapped_weights = self.hf_to_vllm_mapper.apply(weights)
         return self.encoder.load_weights(remapped_weights)
