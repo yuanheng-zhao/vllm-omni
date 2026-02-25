@@ -39,6 +39,7 @@ from vllm.multimodal.processing import (
     BaseProcessingInfo,
     PromptReplacement,
     PromptUpdate,
+    PromptUpdateDetails,
 )
 from vllm.multimodal.profiling import BaseDummyInputsBuilder
 from vllm.sequence import IntermediateTensors
@@ -80,7 +81,8 @@ class MingFlashOmniThinkerProcessingInfo(BaseProcessingInfo):
         ``preprocessor_config.json`` or the processor ``.py`` files, so the
         standard ``AutoProcessor.from_pretrained`` path does not work.
 
-        Instead we construct sub-processors directly:
+        Instead we construct sub-processors directly via
+        ``ctx.init_processor`` (custom processor pattern):
           - **Image**: ``Qwen2VLImageProcessor`` from transformers
             (Ming's ``BailingMM2ImageProcessor`` is a near-identical copy
             of it, with ``patch_size=16`` instead of 14).
@@ -109,26 +111,13 @@ class MingFlashOmniThinkerProcessingInfo(BaseProcessingInfo):
         image_processor = build_image_processor(merge_size=spatial_merge_size)
         audio_processor = build_audio_processor()
 
-        return MingFlashOmniProcessor(
+        return self.ctx.init_processor(
+            MingFlashOmniProcessor,
             image_processor=image_processor,
             audio_processor=audio_processor,
             tokenizer=tokenizer,
             spatial_merge_size=spatial_merge_size,
         )
-
-    def get_image_processor(self, **kwargs: object):
-        """Get the image processor component."""
-        hf_processor = self.get_hf_processor(**kwargs)
-        if hf_processor is not None:
-            return getattr(hf_processor, "image_processor", None)
-        return None
-
-    def get_audio_processor(self, **kwargs: object):
-        """Get the audio processor component."""
-        hf_processor = self.get_hf_processor(**kwargs)
-        if hf_processor is not None:
-            return getattr(hf_processor, "audio_processor", None)
-        return None
 
     def get_supported_mm_limits(self) -> Mapping[str, int | None]:
         """Get supported multimodal limits.
@@ -255,6 +244,8 @@ class MingFlashOmniThinkerMultiModalProcessor(BaseMultiModalProcessor[MingFlashO
 
         This method defines how placeholder tokens (e.g., <IMAGE>, <VIDEO>, <AUDIO>)
         are replaced with the actual patch tokens based on the processed multimodal data.
+        Only patch tokens (<imagePatch>, <framePatch>, <audioPatch>) receive multimodal
+        embeddings; delimiter tokens (<image>, </image>, etc.) use regular text embeddings.
 
         Args:
             mm_items: Parsed multimodal data items.
@@ -264,23 +255,21 @@ class MingFlashOmniThinkerMultiModalProcessor(BaseMultiModalProcessor[MingFlashO
         Returns:
             List of PromptUpdate objects defining token replacements.
         """
-        hf_processor = self.info.get_hf_processor(**hf_processor_mm_kwargs)
+        from .processing_ming_flash_omni import (
+            PLACEHOLDER_AUDIO_TOKEN_IN_TEXT,
+            PLACEHOLDER_IMAGE_TOKEN_IN_TEXT,
+            PLACEHOLDER_VIDEO_TOKEN_IN_TEXT,
+        )
+
         tokenizer = self.info.get_tokenizer()
         vocab = tokenizer.get_vocab()
 
-        # Get token IDs for placeholders
-        # High-level placeholders used in user prompts
-        if hf_processor is not None:
-            image_placeholder = getattr(hf_processor, "image_token", "<IMAGE>")
-            video_placeholder = getattr(hf_processor, "video_token", "<VIDEO>")
-            audio_placeholder = getattr(hf_processor, "audio_token", "<AUDIO>")
-        else:
-            image_placeholder = "<IMAGE>"
-            video_placeholder = "<VIDEO>"
-            audio_placeholder = "<AUDIO>"
+        # High-level placeholder token IDs (targets for replacement)
+        image_placeholder_id = vocab.get(PLACEHOLDER_IMAGE_TOKEN_IN_TEXT, None)
+        video_placeholder_id = vocab.get(PLACEHOLDER_VIDEO_TOKEN_IN_TEXT, None)
+        audio_placeholder_id = vocab.get(PLACEHOLDER_AUDIO_TOKEN_IN_TEXT, None)
 
-        # Detailed patch tokens used in expanded format
-        # Based on Ming's tokenizer: <image>, <imagePatch>, </image>, etc.
+        # Low-level patch/delimiter token IDs (used in replacement sequences)
         image_start_token = vocab.get("<image>", vocab.get("<|image|>", None))
         image_patch_token = vocab.get("<imagePatch>", None)
         image_end_token = vocab.get("</image>", vocab.get("<|/image|>", None))
@@ -300,9 +289,8 @@ class MingFlashOmniThinkerMultiModalProcessor(BaseMultiModalProcessor[MingFlashO
 
         out_mm_data = out_mm_kwargs.get_data()
 
-        def get_replacement_image(item_idx: int) -> list[int]:
+        def get_replacement_image(item_idx: int) -> PromptUpdateDetails:
             """Generate token sequence for an image."""
-            # Get grid dimensions [T, H, W]
             grid_thw = out_mm_data.get("image_grid_thw", None)
             if grid_thw is None:
                 logger.warning("image_grid_thw not found in output, using default 256 patches")
@@ -310,14 +298,13 @@ class MingFlashOmniThinkerMultiModalProcessor(BaseMultiModalProcessor[MingFlashO
             else:
                 if isinstance(grid_thw, torch.Tensor):
                     thw = grid_thw[item_idx]
-                    # Number of patches after spatial merge: (T * H * W) / (spatial_merge_size^2)
                     num_patches = int(thw.prod().item()) // (spatial_merge_size**2)
                 else:
                     thw = grid_thw[item_idx]
                     num_patches = (thw[0] * thw[1] * thw[2]) // (spatial_merge_size**2)
 
             # Build token sequence: <image> <imagePatch>*N </image>
-            tokens = []
+            tokens: list[int] = []
             if image_start_token is not None:
                 tokens.append(image_start_token)
             if image_patch_token is not None:
@@ -325,11 +312,13 @@ class MingFlashOmniThinkerMultiModalProcessor(BaseMultiModalProcessor[MingFlashO
             if image_end_token is not None:
                 tokens.append(image_end_token)
 
-            return tokens
+            # Only <imagePatch> tokens receive multimodal embeddings
+            if image_patch_token is not None:
+                return PromptUpdateDetails.select_token_id(tokens, image_patch_token)
+            return PromptUpdateDetails.from_seq(tokens)
 
-        def get_replacement_video(item_idx: int) -> list[int]:
+        def get_replacement_video(item_idx: int) -> PromptUpdateDetails:
             """Generate token sequence for a video."""
-            # Get grid dimensions [T, H, W]
             grid_thw = out_mm_data.get("video_grid_thw", None)
             if grid_thw is None:
                 logger.warning("video_grid_thw not found in output, using default 512 patches")
@@ -343,7 +332,7 @@ class MingFlashOmniThinkerMultiModalProcessor(BaseMultiModalProcessor[MingFlashO
                     num_patches = (thw[0] * thw[1] * thw[2]) // (spatial_merge_size**2)
 
             # Build token sequence: <video> <framePatch>*N </video>
-            tokens = []
+            tokens: list[int] = []
             if video_start_token is not None:
                 tokens.append(video_start_token)
             if frame_patch_token is not None:
@@ -351,11 +340,13 @@ class MingFlashOmniThinkerMultiModalProcessor(BaseMultiModalProcessor[MingFlashO
             if video_end_token is not None:
                 tokens.append(video_end_token)
 
-            return tokens
+            # Only <framePatch> tokens receive multimodal embeddings
+            if frame_patch_token is not None:
+                return PromptUpdateDetails.select_token_id(tokens, frame_patch_token)
+            return PromptUpdateDetails.from_seq(tokens)
 
-        def get_replacement_audio(item_idx: int) -> list[int]:
+        def get_replacement_audio(item_idx: int) -> PromptUpdateDetails:
             """Generate token sequence for an audio."""
-            # Get audio feature lengths
             audio_feats_lengths = out_mm_data.get("audio_feats_lengths", None)
             if audio_feats_lengths is None:
                 logger.warning("audio_feats_lengths not found in output, using default 100 patches")
@@ -367,7 +358,7 @@ class MingFlashOmniThinkerMultiModalProcessor(BaseMultiModalProcessor[MingFlashO
                     num_patches = audio_feats_lengths[item_idx]
 
             # Build token sequence: <audio> <audioPatch>*N </audio>
-            tokens = []
+            tokens: list[int] = []
             if audio_start_token is not None:
                 tokens.append(audio_start_token)
             if audio_patch_token is not None:
@@ -375,14 +366,16 @@ class MingFlashOmniThinkerMultiModalProcessor(BaseMultiModalProcessor[MingFlashO
             if audio_end_token is not None:
                 tokens.append(audio_end_token)
 
-            return tokens
+            # Only <audioPatch> tokens receive multimodal embeddings
+            if audio_patch_token is not None:
+                return PromptUpdateDetails.select_token_id(tokens, audio_patch_token)
+            return PromptUpdateDetails.from_seq(tokens)
 
         # Build prompt updates
         updates: list[PromptUpdate] = []
 
         # Image replacement
         if mm_items.get_items("image", ImageProcessorItems):
-            image_placeholder_id = vocab.get(image_placeholder, None)
             if image_placeholder_id is not None:
                 updates.append(
                     PromptReplacement(
@@ -394,7 +387,6 @@ class MingFlashOmniThinkerMultiModalProcessor(BaseMultiModalProcessor[MingFlashO
 
         # Video replacement
         if mm_items.get_items("video", VideoProcessorItems):
-            video_placeholder_id = vocab.get(video_placeholder, None)
             if video_placeholder_id is not None:
                 updates.append(
                     PromptReplacement(
@@ -406,7 +398,6 @@ class MingFlashOmniThinkerMultiModalProcessor(BaseMultiModalProcessor[MingFlashO
 
         # Audio replacement
         if mm_items.get_items("audio", AudioProcessorItems):
-            audio_placeholder_id = vocab.get(audio_placeholder, None)
             if audio_placeholder_id is not None:
                 updates.append(
                     PromptReplacement(
@@ -425,7 +416,9 @@ class MingFlashOmniThinkerMultiModalProcessor(BaseMultiModalProcessor[MingFlashO
     ) -> Mapping[str, MultiModalFieldConfig]:
         """Get multimodal field configurations.
 
-        Defines how each multimodal field should be batched and processed.
+        Defines how each multimodal field should be sliced into per-item chunks.
+        Qwen2VL-style image processing concatenates patches from all images into a
+        flat tensor, so pixel_values must use ``flat_from_sizes`` (not ``batched``).
 
         Args:
             hf_inputs: Output from HuggingFace processor.
@@ -436,15 +429,25 @@ class MingFlashOmniThinkerMultiModalProcessor(BaseMultiModalProcessor[MingFlashO
         """
         config: dict[str, MultiModalFieldConfig] = {}
 
-        # Image fields
+        # Image fields — pixel_values is flat (concatenated patches from all images)
+        image_grid_thw = hf_inputs.get("image_grid_thw", torch.empty((0, 3)))
         if "pixel_values" in hf_inputs:
-            config["pixel_values"] = MultiModalFieldConfig.batched("image")
+            image_sizes = image_grid_thw.prod(-1)
+            config["pixel_values"] = MultiModalFieldConfig.flat_from_sizes(
+                "image",
+                image_sizes,
+            )
         if "image_grid_thw" in hf_inputs:
             config["image_grid_thw"] = MultiModalFieldConfig.batched("image")
 
-        # Video fields
+        # Video fields — same flat layout as images
+        video_grid_thw = hf_inputs.get("video_grid_thw", torch.empty((0, 3)))
         if "pixel_values_videos" in hf_inputs:
-            config["pixel_values_videos"] = MultiModalFieldConfig.batched("video")
+            video_sizes = video_grid_thw.prod(-1)
+            config["pixel_values_videos"] = MultiModalFieldConfig.flat_from_sizes(
+                "video",
+                video_sizes,
+            )
         if "video_grid_thw" in hf_inputs:
             config["video_grid_thw"] = MultiModalFieldConfig.batched("video")
 
@@ -465,7 +468,14 @@ class MingFlashOmniThinkerMultiModalProcessor(BaseMultiModalProcessor[MingFlashO
         mm_kwargs: Mapping[str, object],
         tok_kwargs: Mapping[str, object],
     ) -> BatchFeature:
-        """Call the HuggingFace processor to process multimodal inputs.
+        """Call sub-processors for multimodal inputs and tokenize.
+
+        We call the image/audio sub-processors directly (instead of going
+        through ``MingFlashOmniProcessor.__call__``) so that the high-level
+        placeholder tokens (``<IMAGE>``, ``<VIDEO>``, ``<AUDIO>``) remain
+        **unexpanded** in the tokenized output.  vLLM's
+        ``_apply_prompt_updates`` will expand them via the
+        ``PromptReplacement`` objects returned by ``_get_prompt_updates``.
 
         Args:
             prompt: Text prompt with placeholders.
@@ -477,31 +487,49 @@ class MingFlashOmniThinkerMultiModalProcessor(BaseMultiModalProcessor[MingFlashO
             BatchFeature with processed inputs.
         """
         hf_processor = self.info.get_hf_processor()
-
-        # Prepare inputs for HF processor
-        images = mm_data.get("image", None)
-        videos = mm_data.get("video", None)
-        audios = mm_data.get("audio", None)
-
-        has_mm_data = images is not None or videos is not None or audios is not None
-
-        if has_mm_data:
-            # Multimodal data present — processor must handle it; do not
-            # silently fall back to text-only tokenization.
-            hf_inputs = hf_processor(
-                text=prompt,
-                images=images,
-                videos=videos,
-                audios=audios,
-                return_tensors="pt",
-                **mm_kwargs,
-                **tok_kwargs,
-            )
-            return hf_inputs
-
-        # Text-only: tokenize directly (no multimodal processing needed)
         tokenizer = self.info.get_tokenizer()
-        return BatchFeature(tokenizer(prompt, **tok_kwargs))
+
+        data: dict[str, object] = {}
+
+        # Process images (pixel values + grid_thw only, no text expansion)
+        images = mm_data.get("image", None)
+        if images is not None and hf_processor.image_processor is not None:
+            image_outputs = hf_processor.image_processor(
+                images=images,
+                videos=None,
+                return_tensors="pt",
+            )
+            data.update(image_outputs)
+
+        # Process videos
+        videos = mm_data.get("video", None)
+        if videos is not None and hf_processor.image_processor is not None:
+            video_outputs = hf_processor.image_processor(
+                images=None,
+                videos=videos,
+                return_tensors="pt",
+            )
+            # Rename keys to distinguish from images
+            if "pixel_values" in video_outputs:
+                video_outputs["pixel_values_videos"] = video_outputs.pop("pixel_values")
+            if "image_grid_thw" in video_outputs:
+                video_outputs["video_grid_thw"] = video_outputs.pop("image_grid_thw")
+            data.update(video_outputs)
+
+        # Process audio
+        audios = mm_data.get("audio", None)
+        if audios is not None and hf_processor.audio_processor is not None:
+            audio_outputs = hf_processor.audio_processor(
+                audios,
+                return_tensors="pt",
+            )
+            data.update(audio_outputs)
+
+        # Tokenize text with placeholders still intact
+        text_outputs = tokenizer(prompt, return_tensors="pt", **tok_kwargs)
+        data.update(text_outputs)
+
+        return BatchFeature(data=data)
 
 
 # === Main Model Class === #
