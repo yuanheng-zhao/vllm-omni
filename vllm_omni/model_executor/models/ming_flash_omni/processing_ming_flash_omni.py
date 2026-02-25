@@ -23,6 +23,7 @@ for use with vLLM's multimodal infrastructure. It provides the essential
 processing capabilities needed for the Thinker stage.
 """
 
+import logging
 from typing import Any
 
 import numpy as np
@@ -30,6 +31,28 @@ import torch
 from transformers.feature_extraction_utils import BatchFeature
 from transformers.processing_utils import ProcessorMixin
 from transformers.tokenization_utils_base import PreTokenizedInput, TextInput
+
+logger = logging.getLogger(__name__)
+
+# ---------------------------------------------------------------------------
+# Bundled preprocessor config values adapted from Ming's
+# preprocessor_config.json.  Used to construct sub-processors directly
+# when the HF model repo does not ship the processor files.
+# ---------------------------------------------------------------------------
+MING_IMAGE_PROCESSOR_KWARGS: dict[str, Any] = {
+    "min_pixels": 4096,
+    "max_pixels": 16777216,
+    "patch_size": 16,
+    "temporal_patch_size": 2,
+    "merge_size": 2,
+    "image_mean": [0.48145466, 0.4578275, 0.40821073],
+    "image_std": [0.26862954, 0.26130258, 0.27577711],
+}
+
+MING_AUDIO_PROCESSOR_KWARGS: dict[str, Any] = {
+    "sampling_rate": 16000,
+    "n_mels": 128,  # whisper frontend
+}
 
 # Token constants (from original Ming implementation)
 DEFAULT_IMAGE_PATCH_TOKEN = "<imagePatch>"
@@ -55,6 +78,128 @@ SYSTEM_PROMPT_NOTHINK = "<role>SYSTEM</role>你是一个友好的AI助手。\n\n
 SYSTEM_PROMPT_THINK = "<role>SYSTEM</role>你是一个友好的AI助手。\n\ndetailed thinking on"
 
 
+# ---------------------------------------------------------------------------
+# Audio normalization helpers (from Ming's audio_processing_bailingmm2.py)
+# ---------------------------------------------------------------------------
+_NORM_FACTOR_FOR_DTYPE = {
+    torch.int8: 2**7,
+    torch.int16: 2**15,
+    torch.int32: 2**31,
+    torch.int64: 2**63,
+    torch.float32: 1,
+    torch.float64: 1,
+}
+
+
+def _normalize_audio_tensor(
+    waveform: torch.Tensor,
+    sample_rate: int,
+    target_sample_rate: int = 16000,
+) -> torch.Tensor:
+    """Normalize waveform to float32, mono, and optionally resample."""
+    norm_factor = _NORM_FACTOR_FOR_DTYPE.get(waveform.dtype, 1)
+    waveform = waveform.to(torch.float32) / norm_factor
+
+    # Remove channel dimension
+    while len(waveform.shape) > 1:
+        waveform = waveform[0]
+
+    # Resample if needed
+    if sample_rate != target_sample_rate:
+        import torchaudio
+
+        resampler = torchaudio.transforms.Resample(orig_freq=sample_rate, new_freq=target_sample_rate)
+        waveform = resampler(waveform.unsqueeze(0)).squeeze(0)
+
+    return waveform
+
+
+class MingWhisperAudioProcessor:
+    """Lightweight audio processor using Whisper's log-mel spectrogram.
+
+    This replaces BailingMM2AudioProcessor for vLLM-omni usage, avoiding
+    the need for the full Ming audio processing pipeline (WavFrontend,
+    CMVN files, etc.).  The Thinker stage's WhisperAudioEncoder expects
+    whisper-style mel spectrograms, so this is the appropriate frontend.
+    """
+
+    model_input_names = ["audio_feats", "audio_feats_lengths"]
+
+    def __init__(self, sampling_rate: int = 16000, n_mels: int = 128):
+        self.sampling_rate = sampling_rate
+        self.n_mels = n_mels
+
+    def __call__(
+        self,
+        audios: tuple[np.ndarray | torch.Tensor, int] | list[tuple[np.ndarray | torch.Tensor, int]],
+        return_tensors: str | None = None,
+        **kwargs,
+    ) -> BatchFeature:
+        """Preprocess audio(s) into whisper mel spectrograms.
+
+        Args:
+            audios: Single (waveform, sample_rate) or list thereof.
+            return_tensors: Tensor format ("pt" for PyTorch).
+
+        Returns:
+            BatchFeature with audio_feats, audio_feats_lengths,
+            encoder_feats_lengths.
+        """
+        import whisper
+
+        if not isinstance(audios, list):
+            audios = [audios]
+
+        audio_feat_list = []
+        for waveform, sr in audios:
+            if isinstance(waveform, np.ndarray):
+                waveform = torch.from_numpy(waveform)
+            waveform = _normalize_audio_tensor(waveform, sr, target_sample_rate=self.sampling_rate)
+            # Whisper frontend: log-mel spectrogram
+            mel = whisper.log_mel_spectrogram(waveform, n_mels=self.n_mels)
+            # mel shape: [n_mels, T] → we want [T, n_mels]
+            audio_feat_list.append(mel.transpose(0, 1))
+
+        audio_feats_lengths = torch.tensor([[feat.shape[0] for feat in audio_feat_list]], dtype=torch.long)
+        # Whisper encoder has two Conv1d layers (stride=2 each)
+        encoder_feats_lengths = ((audio_feats_lengths - 3 + 2 * 1) // 2 + 1 - 3 + 2 * 1) // 2 + 1
+
+        # Concatenate along time dimension (batch=1 for vLLM)
+        audio_feats = torch.cat(audio_feat_list, dim=0).unsqueeze(0)
+
+        data = {
+            "audio_feats": audio_feats.numpy(),
+            "audio_feats_lengths": audio_feats_lengths.numpy(),
+            "encoder_feats_lengths": encoder_feats_lengths,
+        }
+        return BatchFeature(data=data, tensor_type=return_tensors)
+
+
+# ---------------------------------------------------------------------------
+# Factory functions for building sub-processors from bundled config.
+# ---------------------------------------------------------------------------
+
+
+def build_image_processor(**overrides: Any):
+    """Build an image processor for Ming using Qwen2VLImageProcessor.
+
+    Ming's BailingMM2ImageProcessor is a near-identical copy of
+    Qwen2VLImageProcessor (same resize/normalize logic, same output
+    format: pixel_values + image_grid_thw).  The only difference is
+    default ``patch_size=16`` instead of ``14``.
+    """
+    from transformers import Qwen2VLImageProcessor
+
+    kwargs = {**MING_IMAGE_PROCESSOR_KWARGS, **overrides}
+    return Qwen2VLImageProcessor(**kwargs)
+
+
+def build_audio_processor(**overrides: Any) -> MingWhisperAudioProcessor:
+    """Build the whisper-based audio processor for Ming."""
+    kwargs = {**MING_AUDIO_PROCESSOR_KWARGS, **overrides}
+    return MingWhisperAudioProcessor(**kwargs)
+
+
 class MingFlashOmniProcessor(ProcessorMixin):
     """
     Simplified processor for Ming-flash-omni Thinker stage.
@@ -67,13 +212,10 @@ class MingFlashOmniProcessor(ProcessorMixin):
         image_processor: Image processor for handling images and videos
         audio_processor: Audio processor for handling audio inputs
         tokenizer: Tokenizer for text processing
-        image_token: High-level image placeholder token (default: "<IMAGE>")
-        video_token: High-level video placeholder token (default: "<VIDEO>")
-        audio_token: High-level audio placeholder token (default: "<AUDIO>")
+        spatial_merge_size: Spatial merge size from vision config (default: 2)
     """
 
     attributes = ["image_processor", "audio_processor", "tokenizer"]
-    optional_attributes = []
 
     # These are used by the ProcessorMixin base class
     image_processor_class = "AutoImageProcessor"
@@ -85,21 +227,33 @@ class MingFlashOmniProcessor(ProcessorMixin):
         image_processor=None,
         audio_processor=None,
         tokenizer=None,
-        image_token: str = PLACEHOLDER_IMAGE_TOKEN_IN_TEXT,
-        video_token: str = PLACEHOLDER_VIDEO_TOKEN_IN_TEXT,
-        audio_token: str = PLACEHOLDER_AUDIO_TOKEN_IN_TEXT,
+        spatial_merge_size: int | None = None,
+        merge_size: int | None = None,
         **kwargs,
     ):
+        # High-level placeholder tokens used in user prompts.
+        # These are *not* the same as the low-level delimiters
+        # (<image>, <video>, <audio>) in preprocessor_config.json.
+        self.image_token = PLACEHOLDER_IMAGE_TOKEN_IN_TEXT
+        self.video_token = PLACEHOLDER_VIDEO_TOKEN_IN_TEXT
+        self.audio_token = PLACEHOLDER_AUDIO_TOKEN_IN_TEXT
+
+        # spatial_merge_size can arrive as our explicit kwarg or as
+        # ``merge_size`` from preprocessor_config.json.
+        self.spatial_merge_size = spatial_merge_size or merge_size or 2
+
+        # Set sub-processor attributes directly.  We intentionally skip
+        # ProcessorMixin.__init__'s type-checking because our sub-processors
+        # may be custom classes (Qwen2VLImageProcessor, MingWhisperAudioProcessor)
+        # that don't match the expected Auto* class hierarchy, and some
+        # sub-processors may legitimately be None when the model is used for
+        # text-only inference.
         self.image_processor = image_processor
         self.audio_processor = audio_processor
         self.tokenizer = tokenizer
 
-        # High-level placeholder tokens (used in user prompts)
-        self.image_token = image_token
-        self.video_token = video_token
-        self.audio_token = audio_token
-
-        super().__init__(image_processor, audio_processor, tokenizer)
+        if tokenizer is not None:
+            self.chat_template = getattr(tokenizer, "chat_template", None)
 
     def __call__(
         self,
@@ -203,8 +357,8 @@ class MingFlashOmniProcessor(ProcessorMixin):
 
         # Calculate number of patches per image
         # grid_thw format: [num_images, 3] with (t, h, w)
-        # After spatial merge: patches = (t * h * w) / (merge_size^2)
-        merge_size = 2  # From config, typically 2
+        # After spatial merge: patches = (t * h * w) / (spatial_merge_size^2)
+        merge_size = self.spatial_merge_size
         num_patches_per_image = torch.prod(image_grid_thw, dim=1) // (merge_size**2)
 
         for sample in text:
@@ -238,7 +392,7 @@ class MingFlashOmniProcessor(ProcessorMixin):
         video_index = 0
 
         # Calculate number of patches per video
-        merge_size = 2
+        merge_size = self.spatial_merge_size
         num_patches_per_video = torch.prod(video_grid_thw, dim=1) // (merge_size**2)
 
         for sample in text:

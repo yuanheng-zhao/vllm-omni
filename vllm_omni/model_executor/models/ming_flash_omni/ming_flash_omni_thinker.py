@@ -76,41 +76,58 @@ class MingFlashOmniThinkerProcessingInfo(BaseProcessingInfo):
     def get_hf_processor(self, **kwargs: object):
         """Get the processor for Ming-flash-omni.
 
-        Uses the local MingFlashOmniProcessor implementation since
-        BailingMM2Processor is not released in transformers.
+        The HF model repo (inclusionAI/Ming-flash-omni-2.0) does not ship
+        ``preprocessor_config.json`` or the processor ``.py`` files, so the
+        standard ``AutoProcessor.from_pretrained`` path does not work.
+
+        Instead we construct sub-processors directly:
+          - **Image**: ``Qwen2VLImageProcessor`` from transformers
+            (Ming's ``BailingMM2ImageProcessor`` is a near-identical copy
+            of it, with ``patch_size=16`` instead of 14).
+          - **Audio**: ``MingWhisperAudioProcessor`` bundled in
+            ``processing_ming_flash_omni.py`` (whisper mel spectrogram
+            frontend matching the Thinker's WhisperAudioEncoder).
+
+        Config values (``patch_size``, ``merge_size``, ``min_pixels``,
+        ``max_pixels``, ``n_mels``, etc.) are bundled as constants in
+        ``processing_ming_flash_omni.py``.
         """
-        try:
-            from .processing_ming_flash_omni import MingFlashOmniProcessor
+        from .processing_ming_flash_omni import (
+            MingFlashOmniProcessor,
+            build_audio_processor,
+            build_image_processor,
+        )
 
-            # Get tokenizer
-            tokenizer = self.ctx.get_tokenizer()
+        tokenizer = self.ctx.get_tokenizer()
 
-            # Try to get image and audio processors from config or create defaults
-            # For now, we'll use None and let vLLM's infrastructure handle it
-            # Image and audio processing can be done in the model's forward pass
-            processor = MingFlashOmniProcessor(
-                image_processor=None,  # Will be handled by vLLM
-                audio_processor=None,  # Will be handled by vLLM
-                tokenizer=tokenizer,
-            )
+        # Read spatial_merge_size from vision config for correct patch counting
+        hf_config = self.get_hf_config()
+        spatial_merge_size = 2
+        if hf_config.vision_config is not None:
+            spatial_merge_size = getattr(hf_config.vision_config, "spatial_merge_size", 2)
 
-            return processor
-        except Exception as e:
-            logger.warning(f"Failed to create MingFlashOmniProcessor: {e}")
-            return None
+        image_processor = build_image_processor(merge_size=spatial_merge_size)
+        audio_processor = build_audio_processor()
+
+        return MingFlashOmniProcessor(
+            image_processor=image_processor,
+            audio_processor=audio_processor,
+            tokenizer=tokenizer,
+            spatial_merge_size=spatial_merge_size,
+        )
 
     def get_image_processor(self, **kwargs: object):
         """Get the image processor component."""
         hf_processor = self.get_hf_processor(**kwargs)
-        if hf_processor is not None and hasattr(hf_processor, "image_processor"):
-            return hf_processor.image_processor
+        if hf_processor is not None:
+            return getattr(hf_processor, "image_processor", None)
         return None
 
     def get_audio_processor(self, **kwargs: object):
         """Get the audio processor component."""
         hf_processor = self.get_hf_processor(**kwargs)
-        if hf_processor is not None and hasattr(hf_processor, "audio_processor"):
-            return hf_processor.audio_processor
+        if hf_processor is not None:
+            return getattr(hf_processor, "audio_processor", None)
         return None
 
     def get_supported_mm_limits(self) -> Mapping[str, int | None]:
@@ -461,18 +478,16 @@ class MingFlashOmniThinkerMultiModalProcessor(BaseMultiModalProcessor[MingFlashO
         """
         hf_processor = self.info.get_hf_processor()
 
-        if hf_processor is None:
-            # Fallback: just tokenize text without multimodal processing
-            tokenizer = self.info.get_tokenizer()
-            return BatchFeature(tokenizer(prompt, **tok_kwargs))
-
         # Prepare inputs for HF processor
         images = mm_data.get("image", None)
         videos = mm_data.get("video", None)
         audios = mm_data.get("audio", None)
 
-        # Call the processor
-        try:
+        has_mm_data = images is not None or videos is not None or audios is not None
+
+        if has_mm_data:
+            # Multimodal data present — processor must handle it; do not
+            # silently fall back to text-only tokenization.
             hf_inputs = hf_processor(
                 text=prompt,
                 images=images,
@@ -483,10 +498,10 @@ class MingFlashOmniThinkerMultiModalProcessor(BaseMultiModalProcessor[MingFlashO
                 **tok_kwargs,
             )
             return hf_inputs
-        except Exception as e:
-            logger.warning(f"HF processor failed: {e}. Falling back to tokenizer only.")
-            tokenizer = self.info.get_tokenizer()
-            return BatchFeature(tokenizer(prompt, **tok_kwargs))
+
+        # Text-only: tokenize directly (no multimodal processing needed)
+        tokenizer = self.info.get_tokenizer()
+        return BatchFeature(tokenizer(prompt, **tok_kwargs))
 
 
 # === Main Model Class === #
@@ -603,7 +618,7 @@ class MingFlashOmniThinkerForConditionalGeneration(
         if self.vision is None:
             raise ValueError("Vision encoder not initialized")
 
-        with torch.cuda.amp.autocast(dtype=torch.bfloat16):
+        with torch.amp.autocast("cuda", dtype=torch.bfloat16):
             image_embeds = self.vision(pixel_values, grid_thw=grid_thw)
 
         image_embeds = self.linear_proj(image_embeds)
