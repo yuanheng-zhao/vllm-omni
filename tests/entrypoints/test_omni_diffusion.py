@@ -1319,7 +1319,7 @@ def test_close_sends_shutdown_signal(monkeypatch: pytest.MonkeyPatch, mocker: Mo
     import vllm_omni.entrypoints.omni as omni_module
 
     monkeypatch.setattr(omni_module, "load_and_resolve_stage_configs", _fake_loader)
-    monkeypatch.setattr(omni_module, "OmniStage", lambda cfg, **kwargs: _FakeStage(cfg, **kwargs))
+    monkeypatch.setattr(omni_module, "OmniStage", lambda cfg, **kwargs: _FakeStage(mocker, cfg, **kwargs))
 
     from vllm_omni.entrypoints.omni import Omni
 
