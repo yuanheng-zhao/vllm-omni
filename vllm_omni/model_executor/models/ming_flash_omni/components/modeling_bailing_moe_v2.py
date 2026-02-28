@@ -765,7 +765,7 @@ class BailingMoeV2SparseMoeBlock(nn.Module):
         hidden_states = hidden_states.view(-1, hidden_states.shape[-1])
         y = self.moe_infer(hidden_states, topk_idx, topk_weight).view(bsz, seq_len, h)
 
-        if self.config.num_shared_experts is not None:
+        if hasattr(self, "shared_experts"):
             y = y + self.shared_experts(identity)
 
         return y, (router_logits.view(bsz, seq_len, -1), topk_idx.view(bsz, seq_len, -1))
@@ -853,12 +853,12 @@ class BailingMoeV2Attention(nn.Module):
         )
 
         # Output projection
-        self.o_proj = RowParallelLinear(
+        self.dense = RowParallelLinear(
             total_num_heads * self.head_dim,
             self.hidden_size,
             bias=config.use_bias,
             quant_config=quant_config,
-            prefix=f"{prefix}.o_proj",
+            prefix=f"{prefix}.dense",
         )
 
         # We apply vLLM RMSNorm here rather than BailingMoeV2RMSNorm in the original implementation
@@ -961,7 +961,7 @@ class BailingMoeV2Attention(nn.Module):
 
         # Reshape for output projection
         attn_output = attn_output.reshape(batch_size, seq_len, -1).contiguous()
-        output, _ = self.o_proj(attn_output)
+        output, _ = self.dense(attn_output)
 
         return output
 
@@ -981,12 +981,12 @@ class BailingMoeV2DecoderLayer(nn.Module):
         self.hidden_size = config.hidden_size
         self.layer_idx = layer_idx
 
-        self.self_attn = BailingMoeV2Attention(
+        self.attention = BailingMoeV2Attention(
             config=config,
             layer_idx=layer_idx,
             cache_config=cache_config,
             quant_config=quant_config,
-            prefix=f"{prefix}.self_attn",
+            prefix=f"{prefix}.attention",
         )
 
         # MLP or MoE based on layer index
@@ -1039,7 +1039,7 @@ class BailingMoeV2DecoderLayer(nn.Module):
             # pre-norm with fused residual
             hidden_states, residual = self.input_layernorm(hidden_states, residual)
 
-        hidden_states = self.self_attn(
+        hidden_states = self.attention(
             positions=positions,
             hidden_states=hidden_states,
             attention_mask=attention_mask,
@@ -1051,7 +1051,8 @@ class BailingMoeV2DecoderLayer(nn.Module):
         if self.is_moe:
             hidden_states, _ = self.mlp(hidden_states, image_mask, audio_mask)
         else:
-            hidden_states = self.mlp(hidden_states, image_mask, audio_mask)
+            # Dense MLP only takes hidden_states (no routing masks)
+            hidden_states = self.mlp(hidden_states)
 
         return hidden_states, residual
 
@@ -1407,6 +1408,16 @@ class BailingMoeV2ForCausalLM(nn.Module, CustomProcessMixin):
             # Skip rotary embedding inv_freq
             if "rotary_emb.inv_freq" in name:
                 continue
+
+            # Remap HF checkpoint names to vLLM parameter names:
+            # Router gate: HF stores gate weight directly (e.g. audio_gate.weight)
+            #    but vLLM wraps in ReplicatedLinear (audio_gate.gate.weight)
+            for router_name in ("gate", "image_gate", "audio_gate"):
+                # Only remap .weight, not .expert_bias
+                old = f".{router_name}.weight"
+                new = f".{router_name}.gate.weight"
+                if old in name:
+                    name = name.replace(old, new)
 
             # Handle stacked parameters
             for param_name, weight_name, shard_id in stacked_params_mapping:

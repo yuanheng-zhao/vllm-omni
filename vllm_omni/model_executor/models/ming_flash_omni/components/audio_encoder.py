@@ -310,7 +310,10 @@ class WhisperAudioEncoder(nn.Module):
         "audio.ln_post.weight": "model-00001-of-00042.safetensors",
         "audio.positional_embedding": "model-00001-of-00042.safetensors",
         """
+        # Include both parameters and buffers (positional_embedding is a buffer)
         params_dict = dict(self.named_parameters())
+        buffers_dict = dict(self.named_buffers())
+        params_dict.update(buffers_dict)
         loaded_params: set[str] = set()
 
         for name, loaded_weight in weights:
@@ -318,8 +321,12 @@ class WhisperAudioEncoder(nn.Module):
                 logger.warning("Skipping unknown audio encoder weight: %s", name)
                 continue
             param = params_dict[name]
-            weight_loader = getattr(param, "weight_loader", default_weight_loader)
-            weight_loader(param, loaded_weight)
+            if isinstance(param, torch.Tensor) and not isinstance(param, nn.Parameter):
+                # Buffer: copy data directly
+                param.data.copy_(loaded_weight)
+            else:
+                weight_loader = getattr(param, "weight_loader", default_weight_loader)
+                weight_loader(param, loaded_weight)
             loaded_params.add(name)
 
         return loaded_params
