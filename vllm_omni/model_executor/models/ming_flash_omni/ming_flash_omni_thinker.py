@@ -951,7 +951,7 @@ class MingFlashOmniThinkerForConditionalGeneration(
 
         for name, loaded_weight in weights:
             if name.startswith("model."):
-                llm_weights.append((name, loaded_weight))
+                llm_weights.append((name[len("model.") :], loaded_weight))
             elif name.startswith("vision."):
                 vision_weights.append((name[len("vision.") :], loaded_weight))
             elif name.startswith("audio."):
@@ -967,7 +967,7 @@ class MingFlashOmniThinkerForConditionalGeneration(
         if llm_weights:
             logger.info(f"Loading {len(llm_weights)} LLM weights")
             llm_loaded = self.llm.load_weights(llm_weights)
-            loaded_params.update(llm_loaded)
+            loaded_params.update([f"model.{n}" for n in llm_loaded])
 
         # Load vision encoder weights
         if self.vision and vision_weights:
