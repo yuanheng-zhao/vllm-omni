@@ -79,6 +79,10 @@ class VisionProjector(nn.Module):
         params_dict = dict(self.named_parameters())
         loaded_params: set[str] = set()
         for name, loaded_weight in weights:
+            # HF stores as "0.weight", "2.weight" etc.
+            # but we wrap in self.proj = nn.Sequential, so params are "proj.0.weight"
+            if not name.startswith("proj."):
+                name = f"proj.{name}"
             if name not in params_dict:
                 logger.warning("Skipping unknown vision projector weight: %s", name)
                 continue
@@ -173,6 +177,10 @@ class AudioProjector(nn.Module):
         params_dict = dict(self.named_parameters())
         loaded_params: set[str] = set()
         for name, loaded_weight in weights:
+            # HF stores as "0.weight", "3.weight" etc.
+            # but we wrap in self.proj = nn.Sequential, so params are "proj.0.weight"
+            if not name.startswith("proj."):
+                name = f"proj.{name}"
             if name not in params_dict:
                 logger.warning("Skipping unknown audio projector weight: %s", name)
                 continue
