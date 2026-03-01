@@ -85,6 +85,17 @@ _OMNI_MODELS = {
         "glm_image_ar",
         "GlmImageForConditionalGeneration",
     ),
+    ## Ming-flash-omni 2.0
+    "MingFlashOmniForConditionalGeneration": (
+        "ming_flash_omni",
+        "ming_flash_omni",
+        "MingFlashOmniForConditionalGeneration",
+    ),
+    "MingFlashOmniThinkerForConditionalGeneration": (
+        "ming_flash_omni",
+        "ming_flash_omni_thinker",
+        "MingFlashOmniThinkerForConditionalGeneration",
+    ),
 }
 
 
