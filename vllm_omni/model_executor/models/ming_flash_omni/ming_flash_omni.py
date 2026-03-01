@@ -20,7 +20,6 @@ from collections.abc import Iterable
 
 import torch
 import torch.nn as nn
-from vllm.attention import AttentionMetadata
 from vllm.config import VllmConfig
 from vllm.logger import init_logger
 from vllm.model_executor.models.interfaces import (
@@ -132,8 +131,6 @@ class MingFlashOmniForConditionalGeneration(
         self,
         input_ids: torch.Tensor,
         positions: torch.Tensor,
-        kv_caches,
-        attn_metadata: AttentionMetadata,
         intermediate_tensors: IntermediateTensors | None = None,
         inputs_embeds: torch.Tensor | None = None,
         **kwargs,
@@ -142,8 +139,6 @@ class MingFlashOmniForConditionalGeneration(
         return self.model.forward(
             input_ids=input_ids,
             positions=positions,
-            kv_caches=kv_caches,
-            attn_metadata=attn_metadata,
             intermediate_tensors=intermediate_tensors,
             inputs_embeds=inputs_embeds,
             **kwargs,
