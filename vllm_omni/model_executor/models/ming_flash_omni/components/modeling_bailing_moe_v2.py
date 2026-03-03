@@ -1086,19 +1086,18 @@ class BailingMoeV2Model(nn.Module):
         self.quant_config = quant_config
         self.padding_idx = config.pad_token_id
         self.vocab_size = config.vocab_size
+        self.tie_word_embeddings = getattr(config, "tie_word_embeddings", False)
 
         # Embeddings
-        if get_pp_group().is_first_rank or (
-            getattr(config, "tie_word_embeddings", False) and get_pp_group().is_last_rank
-        ):
-            self.embed_tokens = VocabParallelEmbedding(
+        if get_pp_group().is_first_rank or (self.tie_word_embeddings and get_pp_group().is_last_rank):
+            self.word_embeddings = VocabParallelEmbedding(
                 config.vocab_size,
                 config.hidden_size,
                 quant_config=quant_config,
                 prefix=f"{prefix}.word_embeddings",
             )
         else:
-            self.embed_tokens = PPMissingLayer()
+            self.word_embeddings = PPMissingLayer()
 
         # Decoder layers with pipeline parallelism support
         self.start_layer, self.end_layer, self.layers = make_layers(
@@ -1137,10 +1136,10 @@ class BailingMoeV2Model(nn.Module):
         )
 
     def get_input_embeddings(self):
-        return self.embed_tokens
+        return self.word_embeddings
 
     # def set_input_embeddings(self, value):
-    #     self.embed_tokens = value
+    #     self.word_embeddings = value
 
     def prompt_wrap_vision(self, input_ids, inputs_embeds, vision_embeds, vision_token_id):
         """Merge vision embeddings into input embeddings."""
@@ -1189,7 +1188,7 @@ class BailingMoeV2Model(nn.Module):
         placeholder_audio_loc_lens=None,
     ):
         """Merge all multimodal embeddings."""
-        inputs_embeds = self.embed_tokens(input_ids)
+        inputs_embeds = self.word_embeddings(input_ids)
         vision_mask = None
         audio_mask = None
         if query_embeds_image is None and query_embeds_video is None and query_embeds_audio is None:
@@ -1265,7 +1264,7 @@ class BailingMoeV2Model(nn.Module):
                 if (
                     query_embeds_image is None and query_embeds_video is None and query_embeds_audio is None
                 ) or input_ids.size(1) == 1:
-                    hidden_states = self.embed_tokens(input_ids)
+                    hidden_states = self.word_embeddings(input_ids)
                     image_mask = None
                     audio_mask = None
                 else:
@@ -1341,8 +1340,9 @@ class BailingMoeV2ForCausalLM(nn.Module, CustomProcessMixin):
             prefix=maybe_prefix(prefix, "lm_head"),
         )
 
-        if getattr(config, "tie_word_embeddings", False):
-            self.lm_head.weight = self.model.embed_tokens.weight
+        self.tie_word_embeddings = getattr(config, "tie_word_embeddings", False)
+        if self.tie_word_embeddings:
+            self.lm_head.weight = self.model.word_embeddings.weight
 
         self.logits_processor = LogitsProcessor(config.vocab_size)
         self.sampler = Sampler()
