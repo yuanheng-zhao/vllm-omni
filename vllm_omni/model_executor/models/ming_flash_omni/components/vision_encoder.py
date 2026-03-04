@@ -21,14 +21,6 @@
 Reuses vLLM's Qwen3Omni_VisionTransformer which is architecturally identical
 to Ming's Qwen3MoeVisionTransformer, with weight name mapping handled in
 load_weights().
-
-Key differences between Ming's HF checkpoint and vLLM's implementation:
-  - Ming: ``merger.norm`` → vLLM: ``merger.ln_q``
-  - Ming: ``merger.linear_fc1`` → vLLM: ``merger.mlp.0``
-  - Ming: ``merger.linear_fc2`` → vLLM: ``merger.mlp.2``
-  - Ming: ``deepstack_merger_list`` → vLLM: ``merger_list``
-  - Ming uses ``num_position_embeddings`` config → vLLM expects ``image_size``
-    and ``apply_vit_abs_pos_embed``
 """
 
 from collections.abc import Iterable
@@ -99,7 +91,7 @@ class MingVisionEncoder(nn.Module):
             vision_config=adapted_config,
             norm_eps=norm_eps,
             quant_config=quant_config,
-            prefix=prefix,
+            prefix=f"{prefix}.encoder",
         )
         self.image_emb_dim = vision_config.out_hidden_size
         self.use_deepstack = (
@@ -133,5 +125,22 @@ class MingVisionEncoder(nn.Module):
         return self.encoder(pixel_values, grid_thw=grid_thw)
 
     def load_weights(self, weights: Iterable[tuple[str, torch.Tensor]]) -> set[str]:
+        import re
+
+        def _remap_merger_list_inner(name: str) -> str:
+            # merger_list.0.norm.weight -> merger_list.0.ln_q.weight
+            # merger_list.0.linear_fc1.weight -> merger_list.0.mlp.0.weight
+            # merger_list.0.linear_fc2.weight -> merger_list.0.mlp.2.weight
+            name = re.sub(r"(merger_list\.\d+)\.norm\.", r"\1.ln_q.", name)
+            name = re.sub(r"(merger_list\.\d+)\.linear_fc1\.", r"\1.mlp.0.", name)
+            name = re.sub(r"(merger_list\.\d+)\.linear_fc2\.", r"\1.mlp.2.", name)
+
+            return name
+
         remapped_weights = self.hf_to_vllm_mapper.apply(weights)
-        return self.encoder.load_weights(remapped_weights)
+        remapped_weights = ((_remap_merger_list_inner(name), tensor) for name, tensor in remapped_weights)
+        loaded_params = self.encoder.load_weights(remapped_weights)
+
+        loaded_params = {f"encoder.{loaded_param}" for loaded_param in loaded_params}
+
+        return loaded_params

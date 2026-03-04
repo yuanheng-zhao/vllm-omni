@@ -567,6 +567,7 @@ class MingFlashOmniThinkerForConditionalGeneration(
 
         # Get the thinker config
         config = vllm_config.model_config.hf_config
+        logger.info(f" >>> config: {type(config)}")
 
         if hasattr(config, "llm_config"):
             # If initialized with MingFlashOmniThinkerConfig
@@ -578,13 +579,15 @@ class MingFlashOmniThinkerForConditionalGeneration(
             llm_config = config
             thinker_config = None  # type: ignore
 
+        logger.info(f" >>> thinker_config: {type(thinker_config)}; llm_config: {type(llm_config)}")
+
         self.config = llm_config
         self.thinker_config = thinker_config
         self.have_multimodal_outputs = True
 
         # Initialize LLM as a component (not inherit)
         llm_vllm_config = vllm_config.with_hf_config(llm_config)
-        self.llm = BailingMoeV2ForCausalLM(vllm_config=llm_vllm_config, prefix=maybe_prefix(prefix, "model"))
+        self.llm = BailingMoeV2ForCausalLM(vllm_config=llm_vllm_config, prefix=maybe_prefix(prefix, "llm"))
 
         # Initialize vision encoder if configured
         self.vision = None
@@ -967,7 +970,7 @@ class MingFlashOmniThinkerForConditionalGeneration(
         if llm_weights:
             logger.info(f"Loading {len(llm_weights)} LLM weights")
             llm_loaded = self.llm.load_weights(llm_weights)
-            loaded_params.update([f"model.{n}" for n in llm_loaded])
+            loaded_params.update([f"llm.{n}" for n in llm_loaded])
 
         # Load vision encoder weights
         if self.vision and vision_weights:
