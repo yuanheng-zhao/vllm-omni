@@ -25,13 +25,14 @@ from collections.abc import Iterable
 
 import torch
 from torch import nn
-
-# vLLM imports
 from vllm.config import VllmConfig
 from vllm.config.cache import CacheConfig
 from vllm.distributed import get_pp_group, get_tensor_model_parallel_world_size
 from vllm.logger import init_logger
 from vllm.model_executor.layers.activation import SiluAndMul
+
+# vLLM imports
+from vllm.model_executor.layers.attention import Attention
 from vllm.model_executor.layers.layernorm import RMSNorm
 from vllm.model_executor.layers.linear import (
     MergedColumnParallelLinear,
@@ -55,17 +56,6 @@ from vllm.sequence import IntermediateTensors
 from vllm.v1.outputs import SamplerOutput
 from vllm.v1.sample.sampler import Sampler
 
-from vllm_omni.diffusion.attention.backends.utils.fa import (
-    _pad_input,
-    flash_attn_func,
-    flash_attn_varlen_func,
-)
-from vllm_omni.diffusion.attention.backends.utils.fa import (
-    _unpad_input as _unpad_input_func,
-)
-from vllm_omni.diffusion.attention.backends.utils.fa import (
-    _upad_input as _unpad_input_util,
-)
 from vllm_omni.model_executor.custom_process_mixin import CustomProcessMixin
 
 from .configuration_bailing_moe_v2 import BailingMoeV2Config
@@ -894,55 +884,58 @@ class BailingMoeV2Attention(nn.Module):
         # 3D Rotary embeddings for multimodal
         if config.rope_scaling is not None:
             self.rotary_emb = BailingMoeV2RotaryEmbedding3D(config)
-            # XXX: Seems to be a bug but working(?)
-            # TODO: Test and triage why the original impl applies hardcoded rope type
-            # self.rope_scaling = {"type": "mrope", "mrope_section": [8, 12, 12]}
-            # self.mrope_section = self.rope_scaling["mrope_section"]
             self.rope_type = config.rope_scaling.get("rope_type", config.rope_scaling.get("type"))
             self.mrope_section = config.rope_scaling.get("mrope_section", [8, 12, 12])
         else:
-            # Fallback to standard rope (shouldn't happen for this model)
-            # self.rotary_emb = BailingMoeV2RotaryEmbedding(config)
-            # self.rope_type = "default"
-            # self.mrope_section = None
             raise ValueError("rope_scaling must not be None")
+
+        self.attn = Attention(
+            self.num_heads,
+            self.head_dim,
+            self.scaling,
+            num_kv_heads=self.num_kv_heads,
+            cache_config=cache_config,
+            quant_config=quant_config,
+            prefix=f"{prefix}.attn",
+        )
 
     def forward(
         self,
         positions: torch.Tensor,
         hidden_states: torch.Tensor,
-        attention_mask: torch.Tensor | None = None,
-        is_causal: bool = True,
     ) -> torch.Tensor:
         """Forward pass for attention with 3D RoPE.
 
         Args:
-            positions: Position IDs, shape (3, batch, seq_len) for 3D rope
-            hidden_states: Input hidden states
-            attention_mask: Optional attention mask (batch, seq_len)
+            positions: Position IDs, shape (3, num_tokens) for 3D rope
+                or (num_tokens,) for text-only
+            hidden_states: Input hidden states, shape (num_tokens, hidden_size)
 
         Returns:
-            Attention output tensor
+            Attention output tensor, shape (num_tokens, hidden_size)
         """
-        # QKV projection
+        # QKV projection: [num_tokens, hidden_size] -> [num_tokens, q_size + 2*kv_size]
         qkv, _ = self.qkv_proj(hidden_states)
         q, k, v = qkv.split([self.q_size, self.kv_size, self.kv_size], dim=-1)
 
-        # Reshape for multi-head attention
-        batch_size, seq_len = hidden_states.shape[:2]
-        q = q.view(batch_size, seq_len, self.num_heads, self.head_dim)
-        k = k.view(batch_size, seq_len, self.num_kv_heads, self.head_dim)
-        v = v.view(batch_size, seq_len, self.num_kv_heads, self.head_dim)
+        # Apply Q/K normalization (per-head)
+        num_tokens = q.shape[0]
+        q = self.q_norm(q.view(num_tokens, self.num_heads, self.head_dim)).view(num_tokens, self.q_size)
+        k = self.k_norm(k.view(num_tokens, self.num_kv_heads, self.head_dim)).view(num_tokens, self.kv_size)
 
-        # Apply Q/K normalization
-        orig_q_shape = q.shape
-        orig_k_shape = k.shape
-        q = self.q_norm(q.view(-1, self.head_dim)).view(orig_q_shape)
-        k = self.k_norm(k.view(-1, self.head_dim)).view(orig_k_shape)
+        # Apply 3D rotary embeddings
+        # Reshape positions to (3, 1, num_tokens) to match rope's expected (3, batch, seq_len)
+        if positions.ndim == 2:
+            positions_3d = positions.unsqueeze(1)
+        else:
+            positions_3d = positions.unsqueeze(0).unsqueeze(0).expand(3, 1, -1)
 
-        # Apply 3D rotary embeddings (batch_size, seq_len, heads, head_dim)
-        # use unsqueeze_dim 2
-        cos, sin = self.rotary_emb(hidden_states, positions)
+        cos, sin = self.rotary_emb(hidden_states, positions_3d)
+
+        # Reshape q, k for rope: [num_tokens, size] -> [1, num_tokens, heads, head_dim]
+        q = q.view(1, num_tokens, self.num_heads, self.head_dim)
+        k = k.view(1, num_tokens, self.num_kv_heads, self.head_dim)
+
         q, k = apply_3d_rotary_pos_emb(
             q,
             k,
@@ -954,40 +947,14 @@ class BailingMoeV2Attention(nn.Module):
             rotary_half=(self.rope_dim < self.head_dim),
         )
 
-        if attention_mask is not None and torch.any(~attention_mask):
-            # Unpad input for variable length sequences
-            assert attention_mask.ndim == 2, "attention_mask must be 2D (batch_size, seq_len)"
-            q_unpad, k_unpad, v_unpad, indices_q, (cu_seqlens_q, cu_seqlens_k), (max_seqlen_q, max_seqlen_k) = (
-                _unpad_input_util(q, k, v, attention_mask, seq_len, _unpad_input_func)
-            )
+        # Reshape back to [num_tokens, size] for vLLM attention
+        q = q.view(num_tokens, self.q_size)
+        k = k.view(num_tokens, self.kv_size)
 
-            attn_output_unpad = flash_attn_varlen_func(
-                q_unpad,
-                k_unpad,
-                v_unpad,
-                cu_seqlens_q=cu_seqlens_q,
-                cu_seqlens_k=cu_seqlens_k,
-                max_seqlen_q=max_seqlen_q,
-                max_seqlen_k=max_seqlen_k,
-                dropout_p=0.0,
-                softmax_scale=self.scaling,
-                causal=is_causal,
-            )
-            attn_output = _pad_input(attn_output_unpad, indices_q, batch_size, seq_len)
-        else:
-            attn_output = flash_attn_func(
-                q,
-                k,
-                v,
-                dropout_p=0.0,
-                softmax_scale=self.scaling,
-                causal=is_causal,
-            )
+        # vLLM attention (handles KV cache, paged attention, etc.)
+        attn_output = self.attn(q, k, v)
 
-        # Reshape for output projection
-        attn_output = attn_output.reshape(batch_size, seq_len, -1).contiguous()
         output, _ = self.dense(attn_output)
-
         return output
 
     def load_weights(self, weights: Iterable[tuple[str, torch.Tensor]]) -> set[str]:
@@ -1091,7 +1058,6 @@ class BailingMoeV2DecoderLayer(nn.Module):
         hidden_states = self.attention(
             positions=positions,
             hidden_states=hidden_states,
-            attention_mask=attention_mask,
         )
 
         # pre-norm with fused residual
