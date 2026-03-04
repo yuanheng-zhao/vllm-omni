@@ -103,7 +103,7 @@ class MingFlashOmniForConditionalGeneration(
         if self.model_stage == "thinker":
             # Initialize thinker model (multimodal processing + text generation)
             thinker_vllm_config = vllm_config.with_hf_config(
-                thinker_config.llm_config, architectures=["MingFlashOmniThinkerForConditionalGeneration"]
+                thinker_config, architectures=["MingFlashOmniThinkerForConditionalGeneration"]
             )
             self.thinker = init_vllm_registered_model(
                 vllm_config=thinker_vllm_config,
