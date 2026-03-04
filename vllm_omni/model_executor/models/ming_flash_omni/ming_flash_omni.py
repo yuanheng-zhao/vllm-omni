@@ -31,6 +31,7 @@ from vllm.model_executor.models.utils import (
     init_vllm_registered_model,
     maybe_prefix,
 )
+from vllm.multimodal import MULTIMODAL_REGISTRY
 from vllm.sequence import IntermediateTensors
 
 from vllm_omni.model_executor.custom_process_mixin import CustomProcessMixin
@@ -41,16 +42,20 @@ from .configuration_ming_flash_omni import (
     MingFlashOmniConfig,
     MingFlashOmniThinkerConfig,
 )
+from .ming_flash_omni_thinker import (
+    MingFlashOmniThinkerDummyInputsBuilder,
+    MingFlashOmniThinkerMultiModalProcessor,
+    MingFlashOmniThinkerProcessingInfo,
+)
 
 logger = init_logger(__name__)
 
 
-# TODO: Register multimodal processor when implementing multimodal support
-# @MULTIMODAL_REGISTRY.register_processor(
-#     MingFlashOmniMultiModalProcessor,
-#     info=MingFlashOmniProcessingInfo,
-#     dummy_inputs=MingFlashOmniDummyInputsBuilder,
-# )
+@MULTIMODAL_REGISTRY.register_processor(
+    MingFlashOmniThinkerMultiModalProcessor,
+    info=MingFlashOmniThinkerProcessingInfo,
+    dummy_inputs=MingFlashOmniThinkerDummyInputsBuilder,
+)
 class MingFlashOmniForConditionalGeneration(
     nn.Module,
     SupportsMultiModal,
@@ -78,14 +83,18 @@ class MingFlashOmniForConditionalGeneration(
         self.has_preprocess = False
         self.has_postprocess = False
 
-        config: MingFlashOmniConfig = vllm_config.model_config.hf_config
+        config = vllm_config.model_config.hf_config
 
         # Keep vllm_config for later submodule init
         self.vllm_config = vllm_config
         self.config = config
 
-        # Get thinker config
-        thinker_config: MingFlashOmniThinkerConfig = config.thinker_config
+        # The HF repo ships BailingMM2Config at the root (= thinker config directly).
+        # MingFlashOmniConfig is a local wrapper that the HF repo doesn't use.
+        if isinstance(config, MingFlashOmniConfig):
+            thinker_config: MingFlashOmniThinkerConfig = config.thinker_config
+        else:
+            thinker_config = config  # BailingMM2Config is the thinker config
         self.thinker_config = thinker_config
 
         # Determine model stage
