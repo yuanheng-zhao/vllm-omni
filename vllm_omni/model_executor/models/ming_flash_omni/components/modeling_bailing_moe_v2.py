@@ -44,8 +44,9 @@ from vllm.model_executor.layers.quantization import QuantizationConfig
 from vllm.model_executor.layers.vocab_parallel_embedding import ParallelLMHead, VocabParallelEmbedding
 from vllm.model_executor.model_loader.weight_utils import default_weight_loader
 from vllm.model_executor.models.utils import (
+    AutoWeightsLoader,
     PPMissingLayer,
-    is_pp_missing_parameter,
+    WeightsMapper,
     make_empty_intermediate_tensors_factory,
     make_layers,
     maybe_prefix,
@@ -594,6 +595,30 @@ class BailingMoeV2MLP(nn.Module):
         x, _ = self.down_proj(x)
         return x
 
+    def load_weights(self, weights: Iterable[tuple[str, torch.Tensor]]) -> set[str]:
+        stacked_params_mapping = [
+            ("gate_up_proj", "gate_proj", 0),
+            ("gate_up_proj", "up_proj", 1),
+        ]
+        params_dict = dict(self.named_parameters(remove_duplicate=False))
+        loaded_params: set[str] = set()
+        for name, loaded_weight in weights:
+            for param_name, weight_name, shard_id in stacked_params_mapping:
+                if weight_name not in name:
+                    continue
+                name = name.replace(weight_name, param_name)
+                param = params_dict[name]
+                weight_loader = param.weight_loader
+                weight_loader(param, loaded_weight, shard_id)
+                break
+            else:
+                param = params_dict[name]
+                weight_loader = getattr(param, "weight_loader", default_weight_loader)
+                weight_loader(param, loaded_weight)
+            loaded_params.add(name)
+            logger.debug("Loaded weight %s", name)
+        return loaded_params
+
 
 class BailingMoeV2Gate(nn.Module):
     """MoE routing gate with grouped expert selection."""
@@ -964,6 +989,30 @@ class BailingMoeV2Attention(nn.Module):
         output, _ = self.dense(attn_output)
 
         return output
+
+    def load_weights(self, weights: Iterable[tuple[str, torch.Tensor]]) -> set[str]:
+        stacked_params_mapping = [
+            # BailingMoE stores fused query_key_value in the checkpoint
+            ("qkv_proj", "query_key_value", None),
+        ]
+        params_dict = dict(self.named_parameters(remove_duplicate=False))
+        loaded_params: set[str] = set()
+        for name, loaded_weight in weights:
+            for param_name, weight_name, shard_id in stacked_params_mapping:
+                if weight_name not in name:
+                    continue
+                name = name.replace(weight_name, param_name)
+                param = params_dict[name]
+                weight_loader = param.weight_loader
+                weight_loader(param, loaded_weight, shard_id)
+                break
+            else:
+                param = params_dict[name]
+                weight_loader = getattr(param, "weight_loader", default_weight_loader)
+                weight_loader(param, loaded_weight)
+            loaded_params.add(name)
+            logger.debug("Loaded weight %s", name)
+        return loaded_params
 
 
 class BailingMoeV2DecoderLayer(nn.Module):
@@ -1394,52 +1443,15 @@ class BailingMoeV2ForCausalLM(nn.Module, CustomProcessMixin):
 
     def load_weights(self, weights: Iterable[tuple[str, torch.Tensor]]) -> set[str]:
         """Load weights from HuggingFace checkpoint."""
-        stacked_params_mapping = [
-            # BailingMoE uses fused query_key_value
-            ("qkv_proj", "query_key_value", None),
-            ("gate_up_proj", "gate_proj", 0),
-            ("gate_up_proj", "up_proj", 1),
-        ]
-
-        params_dict = dict(self.named_parameters(remove_duplicate=False))
-        loaded_params: set[str] = set()
-
-        for name, loaded_weight in weights:
-            # Skip rotary embedding inv_freq
-            if "rotary_emb.inv_freq" in name:
-                continue
-
-            # Remap HF checkpoint names to vLLM parameter names:
-            # Router gate: HF stores gate weight directly (e.g. audio_gate.weight)
-            #    but vLLM wraps in ReplicatedLinear (audio_gate.gate.weight)
-            for router_name in ("gate", "image_gate", "audio_gate"):
-                # Only remap .weight, not .expert_bias
-                old = f".{router_name}.weight"
-                new = f".{router_name}.gate.weight"
-                if old in name:
-                    name = name.replace(old, new)
-
-            # Handle stacked parameters
-            for param_name, weight_name, shard_id in stacked_params_mapping:
-                if weight_name not in name:
-                    continue
-                name = name.replace(weight_name, param_name)
-                if is_pp_missing_parameter(name, self):
-                    continue
-                param = params_dict[name]
-                weight_loader = param.weight_loader
-                weight_loader(param, loaded_weight, shard_id)
-                break
-            else:
-                # Regular parameter loading
-                if name.endswith(".bias") and name not in params_dict:
-                    continue
-                if is_pp_missing_parameter(name, self):
-                    continue
-                param = params_dict[name]
-                weight_loader = getattr(param, "weight_loader", default_weight_loader)
-                weight_loader(param, loaded_weight)
-
-            loaded_params.add(name)
-
-        return loaded_params
+        # Remap HF checkpoint names to vLLM parameter names:
+        # Router gate: HF stores gate weight directly (e.g. audio_gate.weight)
+        #    but vLLM wraps in ReplicatedLinear (audio_gate.gate.weight)
+        mapper = WeightsMapper(
+            orig_to_new_substr={f".{r}.weight": f".{r}.gate.weight" for r in ("gate", "image_gate", "audio_gate")}
+        )
+        # Stacked param remapping (query_key_value → qkv_proj, gate/up_proj →
+        # gate_up_proj) is handled by BailingMoeV2Attention.load_weights and
+        # BailingMoeV2MLP.load_weights respectively, which AutoWeightsLoader
+        # dispatches to automatically.
+        loader = AutoWeightsLoader(self)
+        return loader.load_weights(weights, mapper=mapper)
