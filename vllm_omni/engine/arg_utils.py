@@ -12,6 +12,12 @@ from vllm_omni.plugins import load_omni_general_plugins
 logger = init_logger(__name__)
 
 
+# NOTE: Architecture strings whose HF configs are implemented locally in vllm-omni.
+#       Used for situations that HF config applies auto_map but configuration/
+#       files are not present in the HF repo.
+_ARCHS_WITH_LOCAL_HF_CONFIG: set[str] = set()
+
+
 def _register_omni_hf_configs() -> None:
     try:
         from transformers import AutoConfig
@@ -49,6 +55,12 @@ def _register_omni_hf_configs() -> None:
                 AutoConfig.register(model_type, cfg_cls)
             except ValueError:
                 pass  # already registered
+        _ARCHS_WITH_LOCAL_HF_CONFIG.update(
+            {
+                "MingFlashOmniForConditionalGeneration",
+                "MingFlashOmniThinkerForConditionalGeneration",
+            }
+        )
     except Exception as exc:
         logger.warning("Failed to register Ming-flash-omni HF configs: %s", exc)
 
@@ -135,20 +147,11 @@ class OmniEngineArgs(EngineArgs):
         # register omni models to avoid model not found error
         self._ensure_omni_models_registered()
 
-        # NOTE: Some models (e.g. Ming-flash-omni) ship a config.json whose auto_map
-        # points to a remote Python file that does not exist in the HF repo.
-        # transformers prioritises auto_map over CONFIG_MAPPING when trust_remote_code=True,
-        # which causes an OSError during get_config(), as specific file cannot be found.
-        # For these models we registered the local config classes via
-        # AutoConfig.register() in _register_omni_hf_configs().
-        # Passing trust_remote_code=False to OmniModelConfig forces AutoConfig to fall
-        # through to CONFIG_MAPPING (our local class) instead of fetching the
-        # missing remote file. The real value is restored on the config object
-        # right after construction so the rest of the engine is unaffected.
-        _ARCHS_WITH_LOCAL_HF_CONFIG = {
-            "MingFlashOmniForConditionalGeneration",
-            "MingFlashOmniThinkerForConditionalGeneration",
-        }
+        # NOTE: Models with auto_map pointing to a missing remote file fail when
+        # trust_remote_code=True (as transformers prefers auto_map over CONFIG_MAPPING).
+        # Using trust_remote_code=False forces fallback to CONFIG_MAPPING
+        # where our local class is registered.
+        # Restored after construction so the rest of the engine is unaffected.
         effective_trust_remote_code = (
             False
             if self.model_arch in _ARCHS_WITH_LOCAL_HF_CONFIG and self.trust_remote_code
@@ -319,6 +322,13 @@ class AsyncOmniEngineArgs(AsyncEngineArgs):
         # register omni models to avoid model not found error
         self._ensure_omni_models_registered()
 
+        # See OmniEngineArgs.create_model_config() for explanation of this workaround.
+        effective_trust_remote_code = (
+            False
+            if self.model_arch in _ARCHS_WITH_LOCAL_HF_CONFIG and self.trust_remote_code
+            else self.trust_remote_code
+        )
+
         # Keep compatibility when async args are constructed from partial payloads.
         limit_mm_per_prompt = getattr(self, "limit_mm_per_prompt", {})
         language_model_only = getattr(self, "language_model_only", False)
@@ -353,7 +363,7 @@ class AsyncOmniEngineArgs(AsyncEngineArgs):
             convert=self.convert,
             tokenizer=self.tokenizer,
             tokenizer_mode=self.tokenizer_mode,
-            trust_remote_code=self.trust_remote_code,
+            trust_remote_code=effective_trust_remote_code,
             allowed_local_media_path=self.allowed_local_media_path,
             allowed_media_domains=self.allowed_media_domains,
             dtype=self.dtype,
@@ -412,5 +422,7 @@ class AsyncOmniEngineArgs(AsyncEngineArgs):
             task_type=self.task_type,
         )
         omni_config.hf_config.architectures = omni_config.architectures
+        # Restore real trust_remote_code so the rest of the engine is unaffected.
+        omni_config.trust_remote_code = self.trust_remote_code
 
         return omni_config
