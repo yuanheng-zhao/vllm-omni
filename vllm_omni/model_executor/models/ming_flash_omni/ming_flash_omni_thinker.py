@@ -14,6 +14,7 @@ import torch.nn.functional as F
 from transformers.configuration_utils import PretrainedConfig
 from transformers.feature_extraction_utils import BatchFeature
 from vllm.config import VllmConfig
+from vllm.config.multimodal import BaseDummyOptions
 from vllm.logger import init_logger
 from vllm.model_executor.models.interfaces import (
     SupportsMRoPE,
@@ -55,7 +56,7 @@ from .components import (
     WhisperAudioEncoder,
     get_rope_index,
 )
-from .configuration_ming_flash_omni import MingFlashOmniThinkerConfig
+from .configuration_ming_flash_omni import BailingMM2Config, MingFlashOmniThinkerConfig
 
 logger = init_logger(__name__)
 
@@ -70,9 +71,9 @@ class MingFlashOmniThinkerProcessingInfo(BaseProcessingInfo):
     multimodal input processing.
     """
 
-    def get_hf_config(self) -> MingFlashOmniThinkerConfig:
+    def get_hf_config(self) -> BailingMM2Config:
         """Get the HuggingFace configuration for Ming-flash-omni Thinker."""
-        return self.ctx.get_hf_config(MingFlashOmniThinkerConfig)
+        return self.ctx.get_hf_config(BailingMM2Config)
 
     def get_hf_processor(self, **kwargs: object):
         """Get the processor for Ming-flash-omni.
@@ -179,6 +180,7 @@ class MingFlashOmniThinkerDummyInputsBuilder(BaseDummyInputsBuilder[MingFlashOmn
         self,
         seq_len: int,
         mm_counts: Mapping[str, int],
+        mm_options: Mapping[str, BaseDummyOptions] | None = None,
     ) -> MultiModalDataDict:
         """Generate dummy multimodal data for profiling.
 
@@ -200,29 +202,22 @@ class MingFlashOmniThinkerDummyInputsBuilder(BaseDummyInputsBuilder[MingFlashOmn
         audio_duration = 3.0  # seconds
         sample_rate = 16000
 
-        mm_data: MultiModalDataDict = {}
+        audio_length = int(audio_duration * sample_rate)
 
-        if num_images > 0:
-            mm_data["image"] = self._get_dummy_images(
+        mm_data: MultiModalDataDict = {
+            "image": self._get_dummy_images(
                 width=image_width,
                 height=image_height,
                 num_images=num_images,
-            )
-
-        if num_videos > 0:
-            mm_data["video"] = self._get_dummy_videos(
+            ),
+            "video": self._get_dummy_videos(
                 width=video_width,
                 height=video_height,
                 num_frames=num_frames,
                 num_videos=num_videos,
-            )
-
-        if num_audios > 0:
-            # Generate dummy audio: random waveform
-            audio_length = int(audio_duration * sample_rate)
-            mm_data["audio"] = [
-                (np.random.randn(audio_length).astype(np.float32), sample_rate) for _ in range(num_audios)
-            ]
+            ),
+            "audio": [(np.random.randn(audio_length).astype(np.float32), sample_rate) for _ in range(num_audios)],
+        }
 
         return mm_data
 
@@ -375,7 +370,7 @@ class MingFlashOmniThinkerMultiModalProcessor(BaseMultiModalProcessor[MingFlashO
         updates: list[PromptUpdate] = []
 
         # Image replacement
-        if mm_items.get_items("image", ImageProcessorItems):
+        if "image" in mm_items and mm_items.get_items("image", ImageProcessorItems):
             if image_placeholder_id is not None:
                 updates.append(
                     PromptReplacement(
@@ -386,7 +381,7 @@ class MingFlashOmniThinkerMultiModalProcessor(BaseMultiModalProcessor[MingFlashO
                 )
 
         # Video replacement
-        if mm_items.get_items("video", VideoProcessorItems):
+        if "video" in mm_items and mm_items.get_items("video", VideoProcessorItems):
             if video_placeholder_id is not None:
                 updates.append(
                     PromptReplacement(
@@ -397,7 +392,7 @@ class MingFlashOmniThinkerMultiModalProcessor(BaseMultiModalProcessor[MingFlashO
                 )
 
         # Audio replacement
-        if mm_items.get_items("audio", AudioProcessorItems):
+        if "audio" in mm_items and mm_items.get_items("audio", AudioProcessorItems):
             if audio_placeholder_id is not None:
                 updates.append(
                     PromptReplacement(
