@@ -35,6 +35,23 @@ class SequentialOffloadHook(ModelHook):
         self.device = device
         self.pin_memory = pin_memory
 
+    @staticmethod
+    def _move_params(module: nn.Module, device: torch.device) -> None:
+        """Move module parameters and buffers to device.
+
+        This cls method specifically prevents recursion device movement,
+        E.g., Cache-DiT CachedBlocks has attr `transformer` as a ref to original
+        transformer blocks, thus `module.to(device)` will fail for recursion calling,
+        refer to
+        https://github.com/vipshop/cache-dit/blob/v1.2.3/src/cache_dit/caching/cache_blocks/__init__.py#L83
+        """
+        for p in module.parameters():
+            if p.data.device != device:
+                p.data = p.data.to(device, non_blocking=True)
+        for b in module.buffers():
+            if b.device != device:
+                b.data = b.data.to(device, non_blocking=True)
+
     def _to_cpu(self, module: nn.Module) -> None:
         """Move module to CPU."""
         try:
@@ -42,12 +59,11 @@ class SequentialOffloadHook(ModelHook):
         except StopIteration:
             return
 
-        previous_device = param.device
         # Skip if already on CPU
-        if previous_device.type == "cpu":
+        if param.device.type == "cpu":
             return
 
-        module.to("cpu")
+        self._move_params(module, torch.device("cpu"))
         torch.cuda.empty_cache()
 
         if self.pin_memory:
@@ -64,7 +80,7 @@ class SequentialOffloadHook(ModelHook):
         except StopIteration:
             return
 
-        module.to(self.device)
+        self._move_params(module, self.device)
 
     def pre_forward(self, module: nn.Module, *args, **kwargs) -> tuple[tuple, dict]:
         # Offload target modules to CPU
