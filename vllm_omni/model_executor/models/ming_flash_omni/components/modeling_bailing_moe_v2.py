@@ -672,8 +672,9 @@ class BailingMoeV2Gate(nn.Module):
     def forward(self, hidden_states):
         # compute gating score
         hidden_states = hidden_states.view(-1, hidden_states.shape[-1])
-        logits, _ = self.gate(hidden_states.type(torch.float32))
+        logits, _ = self.gate(hidden_states)
 
+        logits = logits.float()  # cast for numerical precision
         scores = torch.sigmoid(logits)
 
         scores_for_routing = scores + self.expert_bias
@@ -734,6 +735,10 @@ class BailingMoeV2SparseMoeBlock(nn.Module):
             )
 
     def forward(self, hidden_states, image_mask, audio_mask):
+        input_is_2d = hidden_states.ndim == 2
+        if input_is_2d:
+            hidden_states = hidden_states.unsqueeze(0)
+
         identity = hidden_states
         bsz, seq_len, h = hidden_states.shape
 
@@ -782,6 +787,12 @@ class BailingMoeV2SparseMoeBlock(nn.Module):
 
         if hasattr(self, "shared_experts"):
             y = y + self.shared_experts(identity)
+
+        if input_is_2d:
+            y = y.squeeze(0)
+            router_logits = router_logits.view(bsz, seq_len, -1).squeeze(0)
+            topk_idx = topk_idx.view(bsz, seq_len, -1).squeeze(0)
+            return y, (router_logits, topk_idx)
 
         return y, (router_logits.view(bsz, seq_len, -1), topk_idx.view(bsz, seq_len, -1))
 

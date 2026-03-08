@@ -191,6 +191,7 @@ def build_image_processor(**overrides: Any):
     from transformers import Qwen2VLImageProcessor
 
     kwargs = {**MING_IMAGE_PROCESSOR_KWARGS, **overrides}
+    print(f" >>> Building image processor... with kwargs: {kwargs}")
     return Qwen2VLImageProcessor(**kwargs)
 
 
