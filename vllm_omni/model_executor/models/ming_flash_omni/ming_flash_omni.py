@@ -232,3 +232,7 @@ class MingFlashOmniForConditionalGeneration(
         if hasattr(self.model, "sampler"):
             return self.model.sampler
         return None
+
+    def embed_multimodal(self, **kwargs):
+        """Delegate to active model for multimodal processing."""
+        return self.model.embed_multimodal(**kwargs)

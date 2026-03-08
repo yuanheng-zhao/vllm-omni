@@ -17,11 +17,12 @@ from vllm.config import VllmConfig
 from vllm.config.multimodal import BaseDummyOptions
 from vllm.logger import init_logger
 from vllm.model_executor.models.interfaces import (
+    MultiModalEmbeddings,
     SupportsMRoPE,
     SupportsMultiModal,
     SupportsPP,
 )
-from vllm.model_executor.models.utils import maybe_prefix
+from vllm.model_executor.models.utils import _merge_multimodal_embeddings, maybe_prefix
 from vllm.multimodal import MULTIMODAL_REGISTRY
 from vllm.multimodal.inputs import (
     MultiModalDataDict,
@@ -259,10 +260,23 @@ class MingFlashOmniThinkerMultiModalProcessor(BaseMultiModalProcessor[MingFlashO
         tokenizer = self.info.get_tokenizer()
         vocab = tokenizer.get_vocab()
 
+        def _get_placeholder_ids(token_str: str) -> list[int] | None:
+            """Get token IDs for a placeholder string.
+
+            First tries vocab lookup (fast path for single special tokens).
+            Falls back to tokenizer.encode() which handles multi-token cases
+            and tokens stored with SentencePiece prefixes (e.g. '▁<IMAGE>').
+            """
+            single_id = vocab.get(token_str)
+            if single_id is not None:
+                return [single_id]
+            ids = tokenizer.encode(token_str, add_special_tokens=False)
+            return ids if ids else None
+
         # High-level placeholder token IDs (targets for replacement)
-        image_placeholder_id = vocab.get(PLACEHOLDER_IMAGE_TOKEN_IN_TEXT, None)
-        video_placeholder_id = vocab.get(PLACEHOLDER_VIDEO_TOKEN_IN_TEXT, None)
-        audio_placeholder_id = vocab.get(PLACEHOLDER_AUDIO_TOKEN_IN_TEXT, None)
+        image_placeholder_ids = _get_placeholder_ids(PLACEHOLDER_IMAGE_TOKEN_IN_TEXT)
+        video_placeholder_ids = _get_placeholder_ids(PLACEHOLDER_VIDEO_TOKEN_IN_TEXT)
+        audio_placeholder_ids = _get_placeholder_ids(PLACEHOLDER_AUDIO_TOKEN_IN_TEXT)
 
         # Low-level patch/delimiter token IDs (used in replacement sequences)
         image_start_token = vocab.get("<image>", vocab.get("<|image|>", None))
@@ -342,15 +356,15 @@ class MingFlashOmniThinkerMultiModalProcessor(BaseMultiModalProcessor[MingFlashO
 
         def get_replacement_audio(item_idx: int) -> PromptUpdateDetails:
             """Generate token sequence for an audio."""
-            audio_feats_lengths = out_mm_data.get("audio_feats_lengths", None)
-            if audio_feats_lengths is None:
-                logger.warning("audio_feats_lengths not found in output, using default 100 patches")
+            encoder_feats_lengths = out_mm_data.get("encoder_feats_lengths", None)
+            if encoder_feats_lengths is None:
+                logger.warning("encoder_feats_lengths not found in output, using default 100 patches")
                 num_patches = 100
             else:
-                if isinstance(audio_feats_lengths, torch.Tensor):
-                    num_patches = int(audio_feats_lengths[item_idx].item())
+                if isinstance(encoder_feats_lengths, torch.Tensor):
+                    num_patches = int(encoder_feats_lengths[item_idx].item())
                 else:
-                    num_patches = audio_feats_lengths[item_idx]
+                    num_patches = encoder_feats_lengths[item_idx]
 
             # Build token sequence: <audio> <audioPatch>*N </audio>
             tokens: list[int] = []
@@ -371,33 +385,33 @@ class MingFlashOmniThinkerMultiModalProcessor(BaseMultiModalProcessor[MingFlashO
 
         # Image replacement
         if "image" in mm_items and mm_items.get_items("image", ImageProcessorItems):
-            if image_placeholder_id is not None:
+            if image_placeholder_ids is not None:
                 updates.append(
                     PromptReplacement(
                         modality="image",
-                        target=[image_placeholder_id],
+                        target=image_placeholder_ids,
                         replacement=get_replacement_image,
                     )
                 )
 
         # Video replacement
         if "video" in mm_items and mm_items.get_items("video", VideoProcessorItems):
-            if video_placeholder_id is not None:
+            if video_placeholder_ids is not None:
                 updates.append(
                     PromptReplacement(
                         modality="video",
-                        target=[video_placeholder_id],
+                        target=video_placeholder_ids,
                         replacement=get_replacement_video,
                     )
                 )
 
         # Audio replacement
         if "audio" in mm_items and mm_items.get_items("audio", AudioProcessorItems):
-            if audio_placeholder_id is not None:
+            if audio_placeholder_ids is not None:
                 updates.append(
                     PromptReplacement(
                         modality="audio",
-                        target=[audio_placeholder_id],
+                        target=audio_placeholder_ids,
                         replacement=get_replacement_audio,
                     )
                 )
@@ -451,6 +465,8 @@ class MingFlashOmniThinkerMultiModalProcessor(BaseMultiModalProcessor[MingFlashO
             config["audio_feats"] = MultiModalFieldConfig.batched("audio")
         if "audio_feats_lengths" in hf_inputs:
             config["audio_feats_lengths"] = MultiModalFieldConfig.batched("audio")
+        if "encoder_feats_lengths" in hf_inputs:
+            config["encoder_feats_lengths"] = MultiModalFieldConfig.batched("audio")
         if "placeholder_audio_loc_lens" in hf_inputs:
             config["placeholder_audio_loc_lens"] = MultiModalFieldConfig.batched("audio")
 
@@ -487,7 +503,7 @@ class MingFlashOmniThinkerMultiModalProcessor(BaseMultiModalProcessor[MingFlashO
         data: dict[str, object] = {}
 
         # Process images (pixel values + grid_thw only, no text expansion)
-        images = mm_data.get("image", None)
+        images = mm_data.get("images", None)
         if images is not None and hf_processor.image_processor is not None:
             image_outputs = hf_processor.image_processor(
                 images=images,
@@ -497,7 +513,7 @@ class MingFlashOmniThinkerMultiModalProcessor(BaseMultiModalProcessor[MingFlashO
             data.update(image_outputs)
 
         # Process videos
-        videos = mm_data.get("video", None)
+        videos = mm_data.get("videos", None)
         if videos is not None and hf_processor.image_processor is not None:
             video_outputs = hf_processor.image_processor(
                 images=None,
@@ -512,10 +528,16 @@ class MingFlashOmniThinkerMultiModalProcessor(BaseMultiModalProcessor[MingFlashO
             data.update(video_outputs)
 
         # Process audio
-        audios = mm_data.get("audio", None)
+        audios = mm_data.get("audios", None)
         if audios is not None and hf_processor.audio_processor is not None:
+            # vLLM's AudioProcessorItems provides raw numpy arrays (already
+            # resampled).  MingWhisperAudioProcessor expects (waveform, sr)
+            # tuples, so wrap them with the target sample rate.
+            target_sr = hf_processor.audio_processor.sampling_rate
+            audio_tuples = [(a, target_sr) if not isinstance(a, tuple) else a for a in audios]
+
             audio_outputs = hf_processor.audio_processor(
-                audios,
+                audio_tuples,
                 return_tensors="pt",
             )
             data.update(audio_outputs)
@@ -647,6 +669,13 @@ class MingFlashOmniThinkerForConditionalGeneration(
         with torch.amp.autocast("cuda", dtype=torch.bfloat16):
             image_embeds = self.vision(pixel_values, grid_thw=grid_thw)
 
+        # When deepstack is enabled, the vision encoder returns concatenated
+        # multi-scale features: [seq_len, out_hidden_size * (1 + num_deepstack)].
+        # The original Ming repo discards deepstack features and only projects
+        # the main features (first out_hidden_size dims) through linear_proj.
+        if self.vision.use_deepstack:
+            image_embeds = image_embeds[:, : self.vision.image_emb_dim]
+
         image_embeds = self.linear_proj(image_embeds)
         image_embeds = F.normalize(image_embeds, dim=-1)
         return image_embeds
@@ -720,6 +749,74 @@ class MingFlashOmniThinkerForConditionalGeneration(
             audio_embeds = F.normalize(audio_embeds, dim=2)
 
         return audio_embeds.to(audio_feats.dtype), audio_embeds_lengths
+
+    def embed_multimodal(self, **kwargs: object) -> MultiModalEmbeddings:
+        """Encode multimodal inputs and return per-item 2D embedding tensors.
+
+        Called by the vLLM v1 model runner before the forward pass.
+        Returns a tuple of 2D tensors (one per multimodal item) which are then
+        merged into input_ids embeddings via embed_input_ids.
+        """
+        embeddings: list[torch.Tensor] = []
+
+        # The vision encoder applies a 2×2 spatial merger, so token count per
+        # image/video is T*H*W // spatial_merge_size².
+        spatial_merge_size = 2
+        if self.thinker_config and self.thinker_config.vision_config:
+            spatial_merge_size = getattr(self.thinker_config.vision_config, "spatial_merge_size", 2)
+        spatial_merge_unit = spatial_merge_size**2
+
+        # --- Images ---
+        pixel_values: torch.Tensor | None = kwargs.get("pixel_values")  # type: ignore[assignment]
+        image_grid_thw: torch.Tensor | None = kwargs.get("image_grid_thw")  # type: ignore[assignment]
+        if pixel_values is not None and image_grid_thw is not None and self.vision is not None:
+            image_embeds = self.extract_image_feature(pixel_values, image_grid_thw)
+            # Split flat [total_tokens, D] into per-image tensors.
+            # After the 2×2 merger, each image has T*H*W // spatial_merge_unit tokens.
+            sizes = (image_grid_thw.prod(dim=-1) // spatial_merge_unit).tolist()
+            for emb in image_embeds.split([int(s) for s in sizes], dim=0):
+                embeddings.append(emb)
+
+        # --- Videos ---
+        pixel_values_videos: torch.Tensor | None = kwargs.get("pixel_values_videos")  # type: ignore[assignment]
+        video_grid_thw: torch.Tensor | None = kwargs.get("video_grid_thw")  # type: ignore[assignment]
+        if pixel_values_videos is not None and video_grid_thw is not None and self.vision is not None:
+            video_embeds = self.extract_image_feature(pixel_values_videos, video_grid_thw)
+            sizes = (video_grid_thw.prod(dim=-1) // spatial_merge_unit).tolist()
+            for emb in video_embeds.split([int(s) for s in sizes], dim=0):
+                embeddings.append(emb)
+
+        # --- Audio ---
+        audio_feats: torch.Tensor | None = kwargs.get("audio_feats")  # type: ignore[assignment]
+        audio_feats_lengths: torch.Tensor | None = kwargs.get("audio_feats_lengths")  # type: ignore[assignment]
+        if audio_feats is not None and audio_feats_lengths is not None and self.audio is not None:
+            audio_embeds, audio_embeds_lengths = self.extract_audio_feature(audio_feats, audio_feats_lengths)
+            for i in range(audio_embeds.size(0)):
+                length = int(audio_embeds_lengths[i].item())
+                embeddings.append(audio_embeds[i, :length, :])
+
+        return tuple(embeddings)
+
+    def embed_input_ids(
+        self,
+        input_ids: torch.Tensor,
+        multimodal_embeddings: MultiModalEmbeddings | None = None,
+        *,
+        is_multimodal: torch.Tensor | None = None,
+        handle_oov_mm_token: bool = False,
+    ) -> torch.Tensor:
+        """Embed input token IDs and scatter multimodal embeddings."""
+        inputs_embeds = self.llm.model.word_embeddings(input_ids)
+
+        if multimodal_embeddings is None or len(multimodal_embeddings) == 0:
+            return inputs_embeds
+
+        assert is_multimodal is not None, "is_multimodal mask required when multimodal_embeddings provided"
+        return _merge_multimodal_embeddings(
+            inputs_embeds=inputs_embeds,
+            multimodal_embeddings=multimodal_embeddings,
+            is_multimodal=is_multimodal,
+        )
 
     def forward(
         self,
