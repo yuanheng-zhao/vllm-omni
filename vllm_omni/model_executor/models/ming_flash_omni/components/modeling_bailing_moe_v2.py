@@ -33,6 +33,7 @@ from vllm.model_executor.layers.activation import SiluAndMul
 
 # vLLM imports
 from vllm.model_executor.layers.attention import Attention
+from vllm.model_executor.layers.fused_moe import FusedMoE
 from vllm.model_executor.layers.layernorm import RMSNorm
 from vllm.model_executor.layers.linear import (
     MergedColumnParallelLinear,
@@ -688,8 +689,38 @@ class BailingMoeV2Gate(nn.Module):
         return topk_idx, topk_weight, logits
 
 
+class _CachedRoutingFn:
+    """Stateful callable that returns pre-computed routing results.
+
+    Used as ``custom_routing_function`` for :class:`FusedMoE` so that
+    the multimodal multi-router logic can be computed externally while
+    still leveraging the fused expert kernels.
+    """
+
+    def __init__(self):
+        self._topk_weights: torch.Tensor | None = None
+        self._topk_ids: torch.Tensor | None = None
+
+    def cache(self, topk_weights: torch.Tensor, topk_ids: torch.Tensor):
+        self._topk_weights = topk_weights
+        self._topk_ids = topk_ids
+
+    def __call__(
+        self,
+        hidden_states: torch.Tensor,
+        gating_output: torch.Tensor,
+        topk: int,
+        renormalize: bool,
+    ) -> tuple[torch.Tensor, torch.Tensor]:
+        assert self._topk_weights is not None, "call cache() before forward"
+        return self._topk_weights.to(torch.float32), self._topk_ids.to(torch.int32)
+
+
 class BailingMoeV2SparseMoeBlock(nn.Module):
-    """Sparse MoE block with MultiRouter support for multimodal routing."""
+    """Sparse MoE block with MultiRouter support for multimodal routing.
+
+    Keep the custom multi-router gating logic external.
+    """
 
     def __init__(
         self,
@@ -701,17 +732,31 @@ class BailingMoeV2SparseMoeBlock(nn.Module):
         self.config = config
         self.num_experts_per_tok = config.num_experts_per_tok
 
-        # Setup experts
-        self.experts = nn.ModuleList(
-            [
-                BailingMoeV2MLP(
-                    config=self.config,
-                    intermediate_size=self.config.moe_intermediate_size,
-                    quant_config=quant_config,
-                    prefix=f"{prefix}.experts.{i}",
-                )
-                for i in range(self.config.num_experts)
-            ]
+        # Routing function for FusedMoE (populated before each forward)
+        self._routing_fn = _CachedRoutingFn()
+
+        # Replace nn.ModuleList of individual experts with FusedMoE
+        self.experts = FusedMoE(
+            num_experts=config.num_experts,
+            top_k=config.num_experts_per_tok,
+            hidden_size=config.hidden_size,
+            intermediate_size=config.moe_intermediate_size,
+            custom_routing_function=self._routing_fn,
+            renormalize=False,  # we handle normalization in the gate
+            reduce_results=True,
+            quant_config=quant_config,
+            prefix=f"{prefix}.experts",
+        )
+
+        # Set expert weight mapping so AutoWeightsLoader can dispatch
+        # checkpoint weights (experts.{i}.gate_proj/up_proj/down_proj)
+        # into the fused w13/w2 tensors.
+        self.experts.expert_mapping = FusedMoE.make_expert_params_mapping(
+            self.experts,
+            ckpt_gate_proj_name="gate_proj",
+            ckpt_down_proj_name="down_proj",
+            ckpt_up_proj_name="up_proj",
+            num_experts=config.num_experts,
         )
 
         self.router_type = self.config.router_type
@@ -782,8 +827,13 @@ class BailingMoeV2SparseMoeBlock(nn.Module):
         else:
             topk_idx, topk_weight, router_logits = self.gate(hidden_states)
 
-        hidden_states = hidden_states.view(-1, hidden_states.shape[-1])
-        y = self.moe_infer(hidden_states, topk_idx, topk_weight).view(bsz, seq_len, h)
+        # Cache pre-computed routing for the custom_routing_function
+        self._routing_fn.cache(topk_weight, topk_idx)
+
+        # FusedMoE expects 2D hidden_states and router_logits
+        hidden_states_2d = hidden_states.view(-1, h)
+        y = self.experts(hidden_states_2d, router_logits)
+        y = y.view(bsz, seq_len, h)
 
         if hasattr(self, "shared_experts"):
             y = y + self.shared_experts(identity)
@@ -795,40 +845,6 @@ class BailingMoeV2SparseMoeBlock(nn.Module):
             return y, (router_logits, topk_idx)
 
         return y, (router_logits.view(bsz, seq_len, -1), topk_idx.view(bsz, seq_len, -1))
-
-    @torch.no_grad()
-    def moe_infer(self, x, topk_ids, topk_weight):
-        """MoE inference with individual expert forward passes."""
-        cnts = topk_ids.new_zeros((topk_ids.shape[0], len(self.experts)))
-        cnts.scatter_(1, topk_ids, 1)
-        tokens_per_expert = cnts.sum(dim=0)
-        idxs = topk_ids.view(-1).argsort()
-        sorted_tokens = x[idxs // topk_ids.shape[1]]
-        tokens_per_expert = tokens_per_expert.cpu().numpy()
-
-        outputs = []
-        start_idx = 0
-        for i, num_tokens in enumerate(tokens_per_expert):
-            end_idx = start_idx + num_tokens
-            if num_tokens == 0:
-                continue
-            expert = self.experts[i]
-            tokens_for_this_expert = sorted_tokens[start_idx:end_idx]
-            expert_out = expert(tokens_for_this_expert)
-            outputs.append(expert_out.to(x.device))
-            start_idx = end_idx
-
-        outs = torch.cat(outputs, dim=0) if len(outputs) else sorted_tokens.new_empty(0)
-        new_x = torch.empty_like(outs)
-        new_x[idxs] = outs
-        final_out = (
-            new_x.view(*topk_ids.shape, -1)
-            .type(topk_weight.dtype)
-            .mul_(topk_weight.unsqueeze(dim=-1))
-            .sum(dim=1)
-            .type(new_x.dtype)
-        )
-        return final_out
 
 
 class BailingMoeV2Attention(nn.Module):
