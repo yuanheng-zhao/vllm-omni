@@ -64,7 +64,7 @@ class SequentialOffloadHook(ModelHook):
             return
 
         self._move_params(module, torch.device("cpu"))
-        torch.cuda.empty_cache()
+        current_omni_platform.empty_cache()
 
         if self.pin_memory:
             for p in module.parameters():
@@ -201,19 +201,6 @@ class ModelLevelOffloadBackend(OffloadBackend):
                 modules.vae.to(self.device, non_blocking=True)
             except Exception as exc:
                 logger.debug("Failed to move VAE to GPU: %s", exc)
-
-        # Initial state: keep DiT modules on CPU (encoders typically run first)
-        # TODO: This part seems to be unnecessary, remove it after testing
-        # for dit_mod in modules.dits:
-        #     dit_mod.to("cpu")
-
-        # torch.cuda.empty_cache()
-
-        # if self.config.pin_cpu_memory:
-        #     for dit_mod in modules.dits:
-        #         for p in dit_mod.parameters():
-        #             if p.data.device.type == "cpu" and not p.data.is_pinned():
-        #                 p.data = p.data.pin_memory()
 
         # Apply sequential offloading hooks
         apply_sequential_offload(
