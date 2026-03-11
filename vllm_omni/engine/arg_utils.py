@@ -20,20 +20,16 @@ def _register_omni_hf_configs() -> None:
         from vllm_omni.model_executor.models.qwen3_tts.configuration_qwen3_tts import (
             Qwen3TTSConfig,
         )
+    except Exception as exc:  # pragma: no cover - best-effort optional registration
+        logger.warning("Skipping omni HF config registration due to import error: %s", exc)
+        return
 
+    try:
         AutoConfig.register("qwen3_tts", Qwen3TTSConfig)
         AutoConfig.register("cosyvoice3", CosyVoice3Config)
     except ValueError:
-        pass  # already registered
-    except Exception as exc:
-        logger.warning("Failed to register Qwen3TTS HF config: %s", exc)
-
-    # Ming-flash-omni 2.0 — eagerly import configs module to trigger
-    # AutoConfig.register() side-effects (same pattern as mammoth_moda2).
-    try:
-        import vllm_omni.transformers_utils.configs.ming_flash_omni as _  # noqa: F401
-    except Exception as exc:
-        logger.warning("Failed to register Ming-flash-omni HF configs: %s", exc)
+        # Already registered elsewhere; ignore.
+        return
 
 
 def register_omni_models_to_vllm():
