@@ -16,13 +16,6 @@
 # Adapted from Ming repository qwen3_moe_vit.py
 # https://github.com/inclusionAI/Ming
 
-"""Vision encoder for Ming-flash-omni-2.0.
-
-Reuses vLLM's Qwen3Omni_VisionTransformer which is architecturally identical
-to Ming's Qwen3MoeVisionTransformer, with weight name mapping handled in
-load_weights().
-"""
-
 from collections.abc import Iterable
 
 import torch

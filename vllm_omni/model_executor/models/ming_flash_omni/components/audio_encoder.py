@@ -3,24 +3,6 @@
 # Adapted from Ming repository modeling_whisper_encoder.py
 # https://github.com/inclusionAI/Ming
 
-"""Whisper-based audio encoder for Ming-flash-omni-2.0.
-
-Ming uses a modified OpenAI Whisper encoder that removes the fixed 30-second
-padding, allowing variable-length audio inputs. The architecture is:
-
-    mel_spectrogram → Conv1d(n_mels, n_state, k=3) → GELU
-                    → Conv1d(n_state, n_state, k=3, s=2) → GELU
-                    → add positional_embedding (truncated to actual length)
-                    → N × ResidualAttentionBlock
-                    → LayerNorm
-
-The encoder outputs are then projected by the audio projector (see projectors.py).
-
-Enhanced with features from Qwen3-TTS WhisperEncoder:
-- Flash attention support with automatic fallback for faster inference
-- Dtype-safe linear and conv layers for mixed precision inference
-"""
-
 import operator
 from collections.abc import Iterable
 from itertools import accumulate

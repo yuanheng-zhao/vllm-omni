@@ -4,35 +4,8 @@
 # Adapted from Ming repository modeling_bailingmm2.py
 # https://github.com/inclusionAI/Ming
 
-"""Modality projectors for Ming-flash-omni-2.0.
-
-Two projectors map encoder outputs into the LLM's embedding space:
-
-1. **Vision projector** (``linear_proj``): MLP that projects vision encoder
-   output (``out_hidden_size``) to LLM hidden size. Depth controlled by
-   ``mlp_depth`` config.
-
-2. **Audio projector** (``linear_proj_audio``): Conv1d downsampling followed
-   by MLP layers. The Conv1d reduces the temporal resolution by
-   ``ds_stride``, then MLP layers project to LLM hidden size. The audio
-   projector wraps the result with Transpose layers to handle the
-   channel-last ↔ channel-first conversion around Conv1d.
-
-Architecture from modeling_bailingmm2.py::
-
-    # Vision projector
-    linear_proj = Sequential(
-        Linear(vision_dim, llm_dim),
-        *[GELU(), Linear(llm_dim, llm_dim)] * (mlp_depth - 1)
-    )
-
-    # Audio projector
-    linear_proj_audio = Sequential(
-        Conv1d(audio_dim, llm_dim, k=ds_kernel_size, s=ds_stride, p=ds_kernel_size//2),
-        Transpose(-1, -2),
-        *[GELU(), Linear(llm_dim, llm_dim)] * (mlp_depth - 1),
-        Transpose(-1, -2),
-    )
+"""Modality projectors for Ming-flash-omni-2.0,
+which map encoder outputs into the LLM's embedding space
 """
 
 from collections.abc import Iterable
