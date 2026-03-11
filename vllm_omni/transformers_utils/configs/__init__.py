@@ -14,6 +14,12 @@ _CLASS_TO_MODULE: dict[str, str] = {
     "Mammothmoda2Qwen2_5_VLConfig": "vllm_omni.transformers_utils.configs.mammoth_moda2",
     "Mammothmoda2Qwen2_5_VLTextConfig": "vllm_omni.transformers_utils.configs.mammoth_moda2",
     "Mammothmoda2Qwen2_5_VLVisionConfig": "vllm_omni.transformers_utils.configs.mammoth_moda2",
+    "BailingMoeV2Config": "vllm_omni.transformers_utils.configs.ming_flash_omni",
+    "BailingMM2Config": "vllm_omni.transformers_utils.configs.ming_flash_omni",
+    "MingFlashOmniThinkerConfig": "vllm_omni.transformers_utils.configs.ming_flash_omni",
+    "MingFlashOmniConfig": "vllm_omni.transformers_utils.configs.ming_flash_omni",
+    "Qwen3VLMoeVisionConfig": "vllm_omni.transformers_utils.configs.ming_flash_omni",
+    "WhisperEncoderConfig": "vllm_omni.transformers_utils.configs.ming_flash_omni",
 }
 
 __all__ = [
@@ -21,6 +27,12 @@ __all__ = [
     "Mammothmoda2Qwen2_5_VLConfig",
     "Mammothmoda2Qwen2_5_VLTextConfig",
     "Mammothmoda2Qwen2_5_VLVisionConfig",
+    "BailingMoeV2Config",
+    "BailingMM2Config",
+    "MingFlashOmniThinkerConfig",
+    "MingFlashOmniConfig",
+    "Qwen3VLMoeVisionConfig",
+    "WhisperEncoderConfig",
 ]
 
 
@@ -40,3 +52,4 @@ def __dir__():
 # Eagerly import all config modules so their AutoConfig.register() side-effects
 # run as soon as `vllm_omni.transformers_utils.configs` is imported.
 from vllm_omni.transformers_utils.configs import mammoth_moda2 as _mammoth_moda2  # noqa: F401, E402
+from vllm_omni.transformers_utils.configs import ming_flash_omni as _ming_flash_omni  # noqa: F401, E402

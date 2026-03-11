@@ -12,12 +12,6 @@ from vllm_omni.plugins import load_omni_general_plugins
 logger = init_logger(__name__)
 
 
-# NOTE: Architecture strings whose HF configs are implemented locally in vllm-omni.
-#       Used for situations that HF config applies auto_map but configuration/
-#       files are not present in the HF repo.
-_ARCHS_WITH_LOCAL_HF_CONFIG: set[str] = set()
-
-
 def _register_omni_hf_configs() -> None:
     try:
         from transformers import AutoConfig
@@ -34,33 +28,10 @@ def _register_omni_hf_configs() -> None:
     except Exception as exc:
         logger.warning("Failed to register Qwen3TTS HF config: %s", exc)
 
-    # Ming-flash-omni 2.0 — register all config classes so that
-    # AutoConfig.from_pretrained() uses our local implementations instead of
-    # trying to fetch the remote configuration_bailingmm2.py dynamic module.
+    # Ming-flash-omni 2.0 — eagerly import configs module to trigger
+    # AutoConfig.register() side-effects (same pattern as mammoth_moda2).
     try:
-        from vllm_omni.model_executor.models.ming_flash_omni.configuration_ming_flash_omni import (
-            BailingMM2Config,
-            BailingMoeV2Config,
-            MingFlashOmniConfig,
-            MingFlashOmniThinkerConfig,
-        )
-
-        for model_type, cfg_cls in [
-            ("ming_flash_omni", MingFlashOmniConfig),
-            ("ming_flash_omni_thinker", MingFlashOmniThinkerConfig),
-            ("bailingmm_moe_v2_lite", BailingMM2Config),
-            ("bailing_moe_v2", BailingMoeV2Config),
-        ]:
-            try:
-                AutoConfig.register(model_type, cfg_cls)
-            except ValueError:
-                pass  # already registered
-        _ARCHS_WITH_LOCAL_HF_CONFIG.update(
-            {
-                "MingFlashOmniForConditionalGeneration",
-                "MingFlashOmniThinkerForConditionalGeneration",
-            }
-        )
+        import vllm_omni.transformers_utils.configs.ming_flash_omni as _  # noqa: F401
     except Exception as exc:
         logger.warning("Failed to register Ming-flash-omni HF configs: %s", exc)
 
@@ -147,17 +118,6 @@ class OmniEngineArgs(EngineArgs):
         # register omni models to avoid model not found error
         self._ensure_omni_models_registered()
 
-        # NOTE: Models with auto_map pointing to a missing remote file fail when
-        # trust_remote_code=True (as transformers prefers auto_map over CONFIG_MAPPING).
-        # Using trust_remote_code=False forces fallback to CONFIG_MAPPING
-        # where our local class is registered.
-        # Restored after construction so the rest of the engine is unaffected.
-        effective_trust_remote_code = (
-            False
-            if self.model_arch in _ARCHS_WITH_LOCAL_HF_CONFIG and self.trust_remote_code
-            else self.trust_remote_code
-        )
-
         # Keep compatibility when async args are constructed from partial payloads.
         limit_mm_per_prompt = getattr(self, "limit_mm_per_prompt", {})
         language_model_only = getattr(self, "language_model_only", False)
@@ -192,7 +152,7 @@ class OmniEngineArgs(EngineArgs):
             convert=self.convert,
             tokenizer=self.tokenizer,
             tokenizer_mode=self.tokenizer_mode,
-            trust_remote_code=effective_trust_remote_code,
+            trust_remote_code=self.trust_remote_code,
             allowed_local_media_path=self.allowed_local_media_path,
             allowed_media_domains=self.allowed_media_domains,
             dtype=self.dtype,
@@ -251,8 +211,6 @@ class OmniEngineArgs(EngineArgs):
             task_type=self.task_type,
         )
         omni_config.hf_config.architectures = omni_config.architectures
-        # Restore real trust_remote_code so the rest of the engine is unaffected.
-        omni_config.trust_remote_code = self.trust_remote_code
 
         return omni_config
 
@@ -322,13 +280,6 @@ class AsyncOmniEngineArgs(AsyncEngineArgs):
         # register omni models to avoid model not found error
         self._ensure_omni_models_registered()
 
-        # See OmniEngineArgs.create_model_config() for explanation of this workaround.
-        effective_trust_remote_code = (
-            False
-            if self.model_arch in _ARCHS_WITH_LOCAL_HF_CONFIG and self.trust_remote_code
-            else self.trust_remote_code
-        )
-
         # Keep compatibility when async args are constructed from partial payloads.
         limit_mm_per_prompt = getattr(self, "limit_mm_per_prompt", {})
         language_model_only = getattr(self, "language_model_only", False)
@@ -363,7 +314,7 @@ class AsyncOmniEngineArgs(AsyncEngineArgs):
             convert=self.convert,
             tokenizer=self.tokenizer,
             tokenizer_mode=self.tokenizer_mode,
-            trust_remote_code=effective_trust_remote_code,
+            trust_remote_code=self.trust_remote_code,
             allowed_local_media_path=self.allowed_local_media_path,
             allowed_media_domains=self.allowed_media_domains,
             dtype=self.dtype,
@@ -422,7 +373,5 @@ class AsyncOmniEngineArgs(AsyncEngineArgs):
             task_type=self.task_type,
         )
         omni_config.hf_config.architectures = omni_config.architectures
-        # Restore real trust_remote_code so the rest of the engine is unaffected.
-        omni_config.trust_remote_code = self.trust_remote_code
 
         return omni_config

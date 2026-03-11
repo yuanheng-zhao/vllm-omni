@@ -140,6 +140,12 @@ _OMNI_MODELS = {
         "ming_flash_omni_thinker",
         "MingFlashOmniThinkerForConditionalGeneration",
     ),
+    # Alias: HF repo currently ships this architecture name in config.json
+    "BailingMM2NativeForConditionalGeneration": (
+        "ming_flash_omni",
+        "ming_flash_omni",
+        "MingFlashOmniForConditionalGeneration",
+    ),
 }
 
 
