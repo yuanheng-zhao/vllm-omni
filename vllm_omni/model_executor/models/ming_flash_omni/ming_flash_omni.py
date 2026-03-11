@@ -37,11 +37,11 @@ from vllm.sequence import IntermediateTensors
 from vllm_omni.model_executor.custom_process_mixin import CustomProcessMixin
 from vllm_omni.model_executor.models.output_templates import OmniOutput
 from vllm_omni.model_executor.models.utils import add_prefix_to_loaded_weights
-
-from .configuration_ming_flash_omni import (
+from vllm_omni.transformers_utils.configs.ming_flash_omni import (
     MingFlashOmniConfig,
     MingFlashOmniThinkerConfig,
 )
+
 from .ming_flash_omni_thinker import (
     MingFlashOmniThinkerDummyInputsBuilder,
     MingFlashOmniThinkerMultiModalProcessor,

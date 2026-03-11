@@ -58,8 +58,8 @@ from vllm.v1.outputs import SamplerOutput
 from vllm.v1.sample.sampler import Sampler
 
 from vllm_omni.model_executor.custom_process_mixin import CustomProcessMixin
+from vllm_omni.transformers_utils.configs.ming_flash_omni import BailingMoeV2Config
 
-from .configuration_bailing_moe_v2 import BailingMoeV2Config
 from .modeling_utils import build_modality_mask, patch_continuous_features
 
 logger = init_logger(__name__)

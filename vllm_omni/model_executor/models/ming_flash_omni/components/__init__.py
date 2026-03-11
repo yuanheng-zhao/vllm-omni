@@ -4,7 +4,6 @@
 """Ming model components - ported from Ming repository."""
 
 from .audio_encoder import WhisperAudioEncoder
-from .configuration_bailing_moe_v2 import BailingMoeV2Config
 from .modeling_bailing_moe_v2 import (
     BailingMoeV2ForCausalLM,
     BailingMoeV2Model,
@@ -22,8 +21,6 @@ from .projectors import AudioProjector, VisionProjector
 from .vision_encoder import MingVisionEncoder
 
 __all__ = [
-    # Config
-    "BailingMoeV2Config",
     # Models
     "BailingMoeV2ForCausalLM",
     "BailingMoeV2Model",

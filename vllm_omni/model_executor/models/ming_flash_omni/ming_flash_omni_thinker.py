@@ -48,6 +48,7 @@ from vllm.sequence import IntermediateTensors
 
 from vllm_omni.model_executor.custom_process_mixin import CustomProcessMixin
 from vllm_omni.model_executor.models.output_templates import OmniOutput
+from vllm_omni.transformers_utils.configs.ming_flash_omni import BailingMM2Config, MingFlashOmniThinkerConfig
 
 from .components import (
     AudioProjector,
@@ -57,7 +58,6 @@ from .components import (
     WhisperAudioEncoder,
     get_rope_index,
 )
-from .configuration_ming_flash_omni import BailingMM2Config, MingFlashOmniThinkerConfig
 
 logger = init_logger(__name__)
 

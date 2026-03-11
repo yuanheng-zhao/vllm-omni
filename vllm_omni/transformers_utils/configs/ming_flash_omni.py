@@ -69,6 +69,14 @@ class BailingMoeV2Config(PretrainedConfig):
         router_type="topN",
         _attn_implementation="flash_attention_2",
         use_interleaved_frame_timestamp=True,
+        # Multimodal token IDs
+        image_patch_token=157157,
+        video_patch_token=157175,
+        image_start_token=157158,
+        video_start_token=157159,
+        # Position encoding parameters
+        spatial_merge_size=2,
+        tokens_per_second=2,
         **kwargs,
     ):
         self.num_hidden_layers = num_hidden_layers
@@ -110,6 +118,14 @@ class BailingMoeV2Config(PretrainedConfig):
         self.router_type = router_type
         self.use_interleaved_frame_timestamp = use_interleaved_frame_timestamp
         self._attn_implementation = _attn_implementation
+
+        # Multimodal token IDs and position encoding
+        self.image_patch_token = image_patch_token
+        self.video_patch_token = video_patch_token
+        self.image_start_token = image_start_token
+        self.video_start_token = video_start_token
+        self.spatial_merge_size = spatial_merge_size
+        self.tokens_per_second = tokens_per_second
 
         super().__init__(pad_token_id=pad_token_id, tie_word_embeddings=tie_word_embeddings, **kwargs)
 
