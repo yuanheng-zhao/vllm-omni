@@ -19,7 +19,7 @@
 import os
 from typing import Any, ClassVar
 
-from transformers import AutoConfig, PretrainedConfig
+from transformers import AutoConfig, AutoTokenizer, PretrainedConfig, PreTrainedTokenizerFast
 from transformers.utils import logging
 
 logger = logging.get_logger(__name__)
@@ -272,3 +272,9 @@ AutoConfig.register(BailingMoeV2Config.model_type, BailingMoeV2Config)
 AutoConfig.register(BailingMM2Config.model_type, BailingMM2Config)
 AutoConfig.register(MingFlashOmniThinkerConfig.model_type, MingFlashOmniThinkerConfig)
 AutoConfig.register(MingFlashOmniConfig.model_type, MingFlashOmniConfig)
+
+# Register tokenizer mapping for composition configs so that
+# AutoTokenizer.from_pretrained can resolve the tokenizer class
+AutoTokenizer.register(BailingMM2Config, fast_tokenizer_class=PreTrainedTokenizerFast)
+AutoTokenizer.register(MingFlashOmniThinkerConfig, fast_tokenizer_class=PreTrainedTokenizerFast)
+AutoTokenizer.register(MingFlashOmniConfig, fast_tokenizer_class=PreTrainedTokenizerFast)
