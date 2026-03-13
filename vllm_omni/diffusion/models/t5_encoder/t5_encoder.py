@@ -1,0 +1,508 @@
+# SPDX-License-Identifier: Apache-2.0
+# SPDX-FileCopyrightText: Copyright contributors to the vLLM project
+from __future__ import annotations
+
+import math
+from collections.abc import Iterable
+
+import torch
+import torch.nn as nn
+import torch.nn.functional as F
+from transformers import T5Config
+from vllm.distributed import get_tensor_model_parallel_rank, get_tensor_model_parallel_world_size
+from vllm.model_executor.layers.activation import get_act_fn
+from vllm.model_executor.layers.linear import (
+    ColumnParallelLinear,
+    MergedColumnParallelLinear,
+    QKVParallelLinear,
+    RowParallelLinear,
+)
+from vllm.model_executor.layers.vocab_parallel_embedding import VocabParallelEmbedding
+from vllm.model_executor.model_loader.weight_utils import default_weight_loader
+
+
+class T5LayerNorm(nn.Module):
+    """T5-style RMSNorm (no bias, no mean subtraction)."""
+
+    def __init__(self, hidden_size: int, eps: float = 1e-6):
+        super().__init__()
+        self.weight = nn.Parameter(torch.ones(hidden_size))
+        self.variance_epsilon = eps
+
+    def forward(self, hidden_states: torch.Tensor) -> torch.Tensor:
+        variance = hidden_states.to(torch.float32).pow(2).mean(-1, keepdim=True)
+        hidden_states = hidden_states * torch.rsqrt(variance + self.variance_epsilon)
+        if self.weight.dtype in (torch.float16, torch.bfloat16):
+            hidden_states = hidden_states.to(self.weight.dtype)
+        return self.weight * hidden_states
+
+
+class T5TPSelfAttention(nn.Module):
+    """Tensor-parallel T5 self-attention.
+
+    Module name: ``SelfAttention`` — matches the HF checkpoint key
+    ``encoder.block.{i}.layer.0.SelfAttention.*``.
+
+    Uses QKVParallelLinear for fused Q/K/V projection (sharded across heads)
+    and RowParallelLinear for the output projection (all-reduce).
+    """
+
+    def __init__(
+        self,
+        config: T5Config,
+        has_relative_attention_bias: bool = False,
+    ):
+        super().__init__()
+        self.d_model = config.d_model
+        self.d_kv = config.d_kv
+        self.n_heads = config.num_heads
+        self.inner_dim = self.n_heads * self.d_kv
+        self.has_relative_attention_bias = has_relative_attention_bias
+        self.relative_attention_num_buckets = config.relative_attention_num_buckets
+        self.relative_attention_max_distance = config.relative_attention_max_distance
+
+        tp_size = get_tensor_model_parallel_world_size()
+        assert self.n_heads % tp_size == 0, f"num_heads ({self.n_heads}) must be divisible by tp_size ({tp_size})"
+        self.n_heads_per_partition = self.n_heads // tp_size
+
+        # Fused Q/K/V projection, sharded across heads.
+        # HF has separate q, k, v — we fuse into qkv_proj and use
+        # stacked_params_mapping in load_weights() to load each shard.
+        self.qkv_proj = QKVParallelLinear(
+            hidden_size=self.d_model,
+            head_size=self.d_kv,
+            total_num_heads=self.n_heads,
+            total_num_kv_heads=self.n_heads,  # T5 uses MHA
+            bias=False,
+        )
+
+        # Output projection: all-reduce back to full d_model
+        # Named ``o`` to match HF's ``SelfAttention.o``
+        self.o = RowParallelLinear(
+            self.inner_dim,
+            self.d_model,
+            bias=False,
+            input_is_parallel=True,
+            return_bias=False,
+        )
+
+        if has_relative_attention_bias:
+            # Store full embedding; slice heads per rank in forward
+            self.relative_attention_bias = nn.Embedding(self.relative_attention_num_buckets, self.n_heads)
+
+    @staticmethod
+    def _relative_position_bucket(
+        relative_position: torch.Tensor,
+        bidirectional: bool = True,
+        num_buckets: int = 32,
+        max_distance: int = 128,
+    ) -> torch.Tensor:
+        relative_buckets = 0
+        if bidirectional:
+            num_buckets //= 2
+            relative_buckets += (relative_position > 0).to(torch.long) * num_buckets
+            relative_position = torch.abs(relative_position)
+        else:
+            relative_position = -torch.min(relative_position, torch.zeros_like(relative_position))
+        max_exact = num_buckets // 2
+        is_small = relative_position < max_exact
+        relative_position_if_large = max_exact + (
+            torch.log(relative_position.float() / max_exact)
+            / math.log(max_distance / max_exact)
+            * (num_buckets - max_exact)
+        ).to(torch.long)
+        relative_position_if_large = torch.min(
+            relative_position_if_large,
+            torch.full_like(relative_position_if_large, num_buckets - 1),
+        )
+        relative_buckets += torch.where(is_small, relative_position, relative_position_if_large)
+        return relative_buckets
+
+    def compute_bias(self, query_length: int, key_length: int, device: torch.device) -> torch.Tensor:
+        """Compute relative position bias, returning only the local head shard."""
+        context_position = torch.arange(query_length, dtype=torch.long, device=device)[:, None]
+        memory_position = torch.arange(key_length, dtype=torch.long, device=device)[None, :]
+        relative_position = memory_position - context_position
+        relative_position_bucket = self._relative_position_bucket(
+            relative_position,
+            bidirectional=True,
+            num_buckets=self.relative_attention_num_buckets,
+            max_distance=self.relative_attention_max_distance,
+        )
+        # values: (query_length, key_length, num_heads)
+        values = self.relative_attention_bias(relative_position_bucket)
+        # Slice to local heads for this TP rank
+        tp_rank = get_tensor_model_parallel_rank()
+        head_start = tp_rank * self.n_heads_per_partition
+        head_end = head_start + self.n_heads_per_partition
+        values = values[:, :, head_start:head_end]
+        # (1, local_heads, query_length, key_length)
+        values = values.permute(2, 0, 1).unsqueeze(0)
+        return values
+
+    def forward(
+        self,
+        hidden_states: torch.Tensor,
+        mask: torch.Tensor | None = None,
+        position_bias: torch.Tensor | None = None,
+    ) -> tuple[torch.Tensor, torch.Tensor]:
+        batch_size, seq_length = hidden_states.shape[:2]
+
+        # Fused QKV projection
+        qkv, _ = self.qkv_proj(hidden_states)
+        q_size = self.n_heads_per_partition * self.d_kv
+        kv_size = self.n_heads_per_partition * self.d_kv
+        query_states, key_states, value_states = qkv.split([q_size, kv_size, kv_size], dim=-1)
+
+        # Reshape: (batch, seq, local_heads, d_kv) -> (batch, local_heads, seq, d_kv)
+        query_states = query_states.view(batch_size, seq_length, self.n_heads_per_partition, self.d_kv).transpose(1, 2)
+        key_states = key_states.view(batch_size, seq_length, self.n_heads_per_partition, self.d_kv).transpose(1, 2)
+        value_states = value_states.view(batch_size, seq_length, self.n_heads_per_partition, self.d_kv).transpose(1, 2)
+
+        # Attention scores: (batch, local_heads, seq, seq)
+        scores = torch.matmul(query_states, key_states.transpose(3, 2))
+
+        if position_bias is None:
+            if self.has_relative_attention_bias:
+                position_bias = self.compute_bias(seq_length, seq_length, device=scores.device)
+            else:
+                position_bias = torch.zeros(
+                    (1, self.n_heads_per_partition, seq_length, seq_length),
+                    device=scores.device,
+                    dtype=scores.dtype,
+                )
+            if mask is not None:
+                position_bias = position_bias + mask
+
+        scores += position_bias
+
+        attn_weights = F.softmax(scores.float(), dim=-1).type_as(scores)
+        attn_output = torch.matmul(attn_weights, value_states)
+
+        # (batch, local_heads, seq, d_kv) -> (batch, seq, local_heads * d_kv)
+        attn_output = attn_output.transpose(1, 2).contiguous()
+        attn_output = attn_output.view(batch_size, seq_length, -1)
+
+        attn_output = self.o(attn_output)
+
+        return attn_output, position_bias
+
+    def load_weights(self, weights: Iterable[tuple[str, torch.Tensor]]) -> set[str]:
+        """Load weights with QKV fusion via stacked_params_mapping."""
+        stacked_params_mapping = [
+            # (param_name, weight_name, shard_id)
+            (".qkv_proj", ".q", "q"),
+            (".qkv_proj", ".k", "k"),
+            (".qkv_proj", ".v", "v"),
+        ]
+
+        params_dict = dict(self.named_parameters())
+        loaded_params: set[str] = set()
+
+        for name, loaded_weight in weights:
+            original_name = name
+            lookup_name = name
+
+            for param_name, weight_name, shard_id in stacked_params_mapping:
+                if weight_name not in original_name:
+                    continue
+                lookup_name = original_name.replace(weight_name, param_name)
+                if lookup_name not in params_dict:
+                    continue
+                param = params_dict[lookup_name]
+                weight_loader = param.weight_loader
+                weight_loader(param, loaded_weight, shard_id)
+                break
+            else:
+                if lookup_name not in params_dict:
+                    continue
+                param = params_dict[lookup_name]
+                weight_loader = getattr(param, "weight_loader", default_weight_loader)
+                weight_loader(param, loaded_weight)
+
+            loaded_params.add(original_name)
+            loaded_params.add(lookup_name)
+
+        return loaded_params
+
+
+class T5TPDenseGatedActDense(nn.Module):
+    """Tensor-parallel T5 gated FFN (used in T5 v1.1 / XXL).
+
+    Module name: ``DenseReluDense`` in the parent — matches the HF checkpoint
+    key ``encoder.block.{i}.layer.1.DenseReluDense.*``.
+
+    wi_0 (gate) and wi_1 (up) are fused into a MergedColumnParallelLinear.
+    wo (down) uses RowParallelLinear.
+    """
+
+    def __init__(self, config: T5Config):
+        super().__init__()
+        self.wi = MergedColumnParallelLinear(
+            config.d_model,
+            [config.d_ff, config.d_ff],
+            bias=False,
+            gather_output=False,
+        )
+        self.wo = RowParallelLinear(
+            config.d_ff,
+            config.d_model,
+            bias=False,
+            input_is_parallel=True,
+            return_bias=False,
+        )
+        self.act = get_act_fn(config.dense_act_fn)
+
+    def forward(self, hidden_states: torch.Tensor) -> torch.Tensor:
+        # MergedColumnParallelLinear outputs concatenated [gate, up]
+        gate_up, _ = self.wi(hidden_states)
+        gate, up = gate_up.chunk(2, dim=-1)
+        hidden_states = self.act(gate) * up
+        hidden_states = self.wo(hidden_states)
+        return hidden_states
+
+    def load_weights(self, weights: Iterable[tuple[str, torch.Tensor]]) -> set[str]:
+        """Load weights with wi_0/wi_1 fusion via stacked_params_mapping."""
+        stacked_params_mapping = [
+            (".wi", ".wi_0", 0),
+            (".wi", ".wi_1", 1),
+        ]
+
+        params_dict = dict(self.named_parameters())
+        loaded_params: set[str] = set()
+
+        for name, loaded_weight in weights:
+            original_name = name
+            lookup_name = name
+
+            for param_name, weight_name, shard_id in stacked_params_mapping:
+                if weight_name not in original_name:
+                    continue
+                lookup_name = original_name.replace(weight_name, param_name)
+                if lookup_name not in params_dict:
+                    continue
+                param = params_dict[lookup_name]
+                weight_loader = param.weight_loader
+                weight_loader(param, loaded_weight, shard_id)
+                break
+            else:
+                if lookup_name not in params_dict:
+                    continue
+                param = params_dict[lookup_name]
+                weight_loader = getattr(param, "weight_loader", default_weight_loader)
+                weight_loader(param, loaded_weight)
+
+            loaded_params.add(original_name)
+            loaded_params.add(lookup_name)
+
+        return loaded_params
+
+
+class T5TPDenseActDense(nn.Module):
+    """Tensor-parallel T5 non-gated FFN (used in original T5).
+
+    Module name: ``DenseReluDense`` in the parent — matches the HF checkpoint
+    key ``encoder.block.{i}.layer.1.DenseReluDense.*``.
+
+    wi uses ColumnParallelLinear, wo uses RowParallelLinear.
+    """
+
+    def __init__(self, config: T5Config):
+        super().__init__()
+        self.wi = ColumnParallelLinear(
+            config.d_model,
+            config.d_ff,
+            bias=False,
+            gather_output=False,
+            return_bias=False,
+        )
+        self.wo = RowParallelLinear(
+            config.d_ff,
+            config.d_model,
+            bias=False,
+            input_is_parallel=True,
+            return_bias=False,
+        )
+        self.act = get_act_fn(config.dense_act_fn)
+
+    def forward(self, hidden_states: torch.Tensor) -> torch.Tensor:
+        hidden_states, _ = self.wi(hidden_states)
+        hidden_states = self.act(hidden_states)
+        hidden_states = self.wo(hidden_states)
+        return hidden_states
+
+
+class T5TPLayerSelfAttention(nn.Module):
+    """Pre-norm self-attention sub-layer.
+
+    Named ``layer.0`` via the parent ModuleList — matches
+    ``encoder.block.{i}.layer.0.*``.
+    """
+
+    def __init__(self, config: T5Config, has_relative_attention_bias: bool = False):
+        super().__init__()
+        self.SelfAttention = T5TPSelfAttention(config, has_relative_attention_bias)
+        self.layer_norm = T5LayerNorm(config.d_model, eps=config.layer_norm_epsilon)
+
+    def forward(
+        self,
+        hidden_states: torch.Tensor,
+        mask: torch.Tensor | None = None,
+        position_bias: torch.Tensor | None = None,
+    ) -> tuple[torch.Tensor, torch.Tensor]:
+        normed = self.layer_norm(hidden_states)
+        attn_output, position_bias = self.SelfAttention(normed, mask=mask, position_bias=position_bias)
+        hidden_states = hidden_states + attn_output
+
+        # Clamp for fp16 stability (matching HF T5)
+        if hidden_states.dtype == torch.float16:
+            clamp_value = torch.finfo(hidden_states.dtype).max - 1000
+            hidden_states = torch.clamp(hidden_states, min=-clamp_value, max=clamp_value)
+
+        return hidden_states, position_bias
+
+
+class T5TPLayerFF(nn.Module):
+    """Pre-norm feed-forward sub-layer.
+
+    Named ``layer.1`` via the parent ModuleList — matches
+    ``encoder.block.{i}.layer.1.*``.
+    """
+
+    def __init__(self, config: T5Config):
+        super().__init__()
+        if config.is_gated_act:
+            self.DenseReluDense = T5TPDenseGatedActDense(config)
+        else:
+            self.DenseReluDense = T5TPDenseActDense(config)
+        self.layer_norm = T5LayerNorm(config.d_model, eps=config.layer_norm_epsilon)
+
+    def forward(self, hidden_states: torch.Tensor) -> torch.Tensor:
+        normed = self.layer_norm(hidden_states)
+        ff_output = self.DenseReluDense(normed)
+        hidden_states = hidden_states + ff_output
+
+        if hidden_states.dtype == torch.float16:
+            clamp_value = torch.finfo(hidden_states.dtype).max - 1000
+            hidden_states = torch.clamp(hidden_states, min=-clamp_value, max=clamp_value)
+
+        return hidden_states
+
+
+class T5TPBlock(nn.Module):
+    """Single T5 encoder block.
+
+    Uses a ``nn.ModuleList`` named ``layer`` so that children are indexed as
+    ``layer.0`` (self-attention) and ``layer.1`` (feed-forward) — matching
+    ``encoder.block.{i}.layer.{0,1}.*``.
+    """
+
+    def __init__(self, config: T5Config, has_relative_attention_bias: bool = False):
+        super().__init__()
+        self.layer = nn.ModuleList(
+            [
+                T5TPLayerSelfAttention(config, has_relative_attention_bias),
+                T5TPLayerFF(config),
+            ]
+        )
+
+    def forward(
+        self,
+        hidden_states: torch.Tensor,
+        mask: torch.Tensor | None = None,
+        position_bias: torch.Tensor | None = None,
+    ) -> tuple[torch.Tensor, torch.Tensor]:
+        hidden_states, position_bias = self.layer[0](hidden_states, mask=mask, position_bias=position_bias)
+        hidden_states = self.layer[1](hidden_states)
+        return hidden_states, position_bias
+
+
+class T5TPStack(nn.Module):
+    """T5 encoder stack.
+
+    Named ``encoder`` in the parent model — matches ``encoder.block.*``,
+    ``encoder.final_layer_norm.*``, etc.
+    """
+
+    def __init__(self, config: T5Config, shared: nn.Embedding):
+        super().__init__()
+        self.embed_tokens = shared
+        self.block = nn.ModuleList(
+            [T5TPBlock(config, has_relative_attention_bias=(i == 0)) for i in range(config.num_layers)]
+        )
+        self.final_layer_norm = T5LayerNorm(config.d_model, eps=config.layer_norm_epsilon)
+
+    def forward(
+        self,
+        input_ids: torch.Tensor,
+        attention_mask: torch.Tensor | None = None,
+    ) -> torch.Tensor:
+        hidden_states = self.embed_tokens(input_ids)
+
+        # Build attention mask: (batch, seq) -> (batch, 1, 1, seq)
+        if attention_mask is not None:
+            extended_mask = attention_mask[:, None, None, :].to(dtype=hidden_states.dtype)
+            extended_mask = (1.0 - extended_mask) * torch.finfo(hidden_states.dtype).min
+        else:
+            extended_mask = None
+
+        position_bias = None
+        for block in self.block:
+            hidden_states, position_bias = block(
+                hidden_states,
+                mask=extended_mask,
+                position_bias=position_bias,
+            )
+
+        hidden_states = self.final_layer_norm(hidden_states)
+        return hidden_states
+
+
+class T5TPEncoderModel(nn.Module):
+    """Tensor-parallel T5 encoder model.
+
+    Drop-in replacement for ``transformers.T5EncoderModel`` that shards
+    attention heads and FFN intermediate dimensions across TP ranks using
+    vLLM parallel linear layers.
+
+    The module hierarchy mirrors HF exactly::
+
+        shared                                   (Embedding)
+        encoder.block.{i}.layer.0.SelfAttention  (T5TPSelfAttention)
+        encoder.block.{i}.layer.0.layer_norm     (T5LayerNorm)
+        encoder.block.{i}.layer.1.DenseReluDense (T5TPDenseGatedActDense / T5TPDenseActDense)
+        encoder.block.{i}.layer.1.layer_norm     (T5LayerNorm)
+        encoder.final_layer_norm                 (T5LayerNorm)
+
+    Weight loading relies on ``AutoWeightsLoader`` recursively dispatching
+    into child modules. Only ``T5TPSelfAttention`` and
+    ``T5TPDenseGatedActDense`` define ``load_weights()`` for QKV / gated-FFN
+    fusion; all other parameters are loaded directly by name.
+    """
+
+    def __init__(self, config: T5Config):
+        super().__init__()
+        self.config = config
+        self.shared = VocabParallelEmbedding(config.vocab_size, config.d_model)
+        self.encoder = T5TPStack(config, self.shared)
+
+    @property
+    def dtype(self) -> torch.dtype:
+        return self.shared.weight.dtype
+
+    @property
+    def device(self) -> torch.device:
+        return self.shared.weight.device
+
+    def forward(
+        self,
+        input_ids: torch.Tensor,
+        attention_mask: torch.Tensor | None = None,
+        output_hidden_states: bool = False,
+    ) -> tuple[torch.Tensor, ...]:
+        """Forward pass matching HF T5EncoderModel output format.
+
+        Returns a tuple where the first element is ``last_hidden_state``.
+        """
+        hidden_states = self.encoder(input_ids, attention_mask=attention_mask)
+        return (hidden_states,)
