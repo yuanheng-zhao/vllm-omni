@@ -27,7 +27,7 @@ from vllm_omni.diffusion.distributed.parallel_state import get_classifier_free_g
 from vllm_omni.diffusion.distributed.utils import get_local_device
 from vllm_omni.diffusion.model_loader.diffusers_loader import DiffusersPipelineLoader
 from vllm_omni.diffusion.models.flux import FluxTransformer2DModel
-from vllm_omni.diffusion.models.t5_encoder import T5TPEncoderModel
+from vllm_omni.diffusion.models.t5_encoder import T5EncoderModel
 from vllm_omni.diffusion.quantization import get_vllm_quant_config_for_layers
 from vllm_omni.diffusion.request import OmniDiffusionRequest
 from vllm_omni.model_executor.model_loader.weight_utils import download_weights_from_hf_specific
@@ -170,7 +170,7 @@ class FluxPipeline(nn.Module, CFGParallelMixin):
             model, subfolder="text_encoder", local_files_only=local_files_only
         )
         t5_config = AutoConfig.from_pretrained(model, subfolder="text_encoder_2", local_files_only=local_files_only)
-        self.text_encoder_2 = T5TPEncoderModel(t5_config)
+        self.text_encoder_2 = T5EncoderModel(t5_config)
         self.vae = AutoencoderKL.from_pretrained(model, subfolder="vae", local_files_only=local_files_only).to(
             self.device
         )
@@ -293,7 +293,7 @@ class FluxPipeline(nn.Module, CFGParallelMixin):
                 f" {max_sequence_length} tokens: {removed_text}"
             )
 
-        prompt_embeds = self.text_encoder_2(text_input_ids.to(self.device), output_hidden_states=False)[0]
+        prompt_embeds = self.text_encoder_2(text_input_ids.to(self.device))[0]
 
         dtype = self.text_encoder_2.dtype
         prompt_embeds = prompt_embeds.to(dtype=dtype, device=self.device)

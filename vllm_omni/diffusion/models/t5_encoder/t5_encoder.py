@@ -37,16 +37,7 @@ class T5LayerNorm(nn.Module):
         return self.weight * hidden_states
 
 
-class T5TPSelfAttention(nn.Module):
-    """Tensor-parallel T5 self-attention.
-
-    Module name: ``SelfAttention`` — matches the HF checkpoint key
-    ``encoder.block.{i}.layer.0.SelfAttention.*``.
-
-    Uses QKVParallelLinear for fused Q/K/V projection (sharded across heads)
-    and RowParallelLinear for the output projection (all-reduce).
-    """
-
+class T5SelfAttention(nn.Module):
     def __init__(
         self,
         config: T5Config,
@@ -188,12 +179,12 @@ class T5TPSelfAttention(nn.Module):
         return attn_output, position_bias
 
     def load_weights(self, weights: Iterable[tuple[str, torch.Tensor]]) -> set[str]:
-        """Load weights with QKV fusion via stacked_params_mapping."""
+        # load weights with QKV fusion via stacked_params_mapping
         stacked_params_mapping = [
             # (param_name, weight_name, shard_id)
-            (".qkv_proj", ".q", "q"),
-            (".qkv_proj", ".k", "k"),
-            (".qkv_proj", ".v", "v"),
+            ("qkv_proj", "q", "q"),
+            ("qkv_proj", "k", "k"),
+            ("qkv_proj", "v", "v"),
         ]
 
         params_dict = dict(self.named_parameters())
@@ -226,16 +217,7 @@ class T5TPSelfAttention(nn.Module):
         return loaded_params
 
 
-class T5TPDenseGatedActDense(nn.Module):
-    """Tensor-parallel T5 gated FFN (used in T5 v1.1 / XXL).
-
-    Module name: ``DenseReluDense`` in the parent — matches the HF checkpoint
-    key ``encoder.block.{i}.layer.1.DenseReluDense.*``.
-
-    wi_0 (gate) and wi_1 (up) are fused into a MergedColumnParallelLinear.
-    wo (down) uses RowParallelLinear.
-    """
-
+class T5DenseGatedActDense(nn.Module):
     def __init__(self, config: T5Config):
         super().__init__()
         self.wi = MergedColumnParallelLinear(
@@ -262,10 +244,10 @@ class T5TPDenseGatedActDense(nn.Module):
         return hidden_states
 
     def load_weights(self, weights: Iterable[tuple[str, torch.Tensor]]) -> set[str]:
-        """Load weights with wi_0/wi_1 fusion via stacked_params_mapping."""
+        # Load weights with wi_0/wi_1 fusion
         stacked_params_mapping = [
-            (".wi", ".wi_0", 0),
-            (".wi", ".wi_1", 1),
+            ("wi", "wi_0", 0),
+            ("wi", "wi_1", 1),
         ]
 
         params_dict = dict(self.named_parameters())
@@ -298,15 +280,7 @@ class T5TPDenseGatedActDense(nn.Module):
         return loaded_params
 
 
-class T5TPDenseActDense(nn.Module):
-    """Tensor-parallel T5 non-gated FFN (used in original T5).
-
-    Module name: ``DenseReluDense`` in the parent — matches the HF checkpoint
-    key ``encoder.block.{i}.layer.1.DenseReluDense.*``.
-
-    wi uses ColumnParallelLinear, wo uses RowParallelLinear.
-    """
-
+class T5DenseActDense(nn.Module):
     def __init__(self, config: T5Config):
         super().__init__()
         self.wi = ColumnParallelLinear(
@@ -326,22 +300,17 @@ class T5TPDenseActDense(nn.Module):
         self.act = get_act_fn(config.dense_act_fn)
 
     def forward(self, hidden_states: torch.Tensor) -> torch.Tensor:
-        hidden_states, _ = self.wi(hidden_states)
+        hidden_states = self.wi(hidden_states)
         hidden_states = self.act(hidden_states)
         hidden_states = self.wo(hidden_states)
         return hidden_states
 
 
-class T5TPLayerSelfAttention(nn.Module):
-    """Pre-norm self-attention sub-layer.
-
-    Named ``layer.0`` via the parent ModuleList — matches
-    ``encoder.block.{i}.layer.0.*``.
-    """
-
+class T5LayerSelfAttention(nn.Module):
+    # TODO: consider
     def __init__(self, config: T5Config, has_relative_attention_bias: bool = False):
         super().__init__()
-        self.SelfAttention = T5TPSelfAttention(config, has_relative_attention_bias)
+        self.SelfAttention = T5SelfAttention(config, has_relative_attention_bias)
         self.layer_norm = T5LayerNorm(config.d_model, eps=config.layer_norm_epsilon)
 
     def forward(
@@ -362,19 +331,13 @@ class T5TPLayerSelfAttention(nn.Module):
         return hidden_states, position_bias
 
 
-class T5TPLayerFF(nn.Module):
-    """Pre-norm feed-forward sub-layer.
-
-    Named ``layer.1`` via the parent ModuleList — matches
-    ``encoder.block.{i}.layer.1.*``.
-    """
-
+class T5LayerFF(nn.Module):
     def __init__(self, config: T5Config):
         super().__init__()
         if config.is_gated_act:
-            self.DenseReluDense = T5TPDenseGatedActDense(config)
+            self.DenseReluDense = T5DenseGatedActDense(config)
         else:
-            self.DenseReluDense = T5TPDenseActDense(config)
+            self.DenseReluDense = T5DenseActDense(config)
         self.layer_norm = T5LayerNorm(config.d_model, eps=config.layer_norm_epsilon)
 
     def forward(self, hidden_states: torch.Tensor) -> torch.Tensor:
@@ -389,20 +352,13 @@ class T5TPLayerFF(nn.Module):
         return hidden_states
 
 
-class T5TPBlock(nn.Module):
-    """Single T5 encoder block.
-
-    Uses a ``nn.ModuleList`` named ``layer`` so that children are indexed as
-    ``layer.0`` (self-attention) and ``layer.1`` (feed-forward) — matching
-    ``encoder.block.{i}.layer.{0,1}.*``.
-    """
-
+class T5Block(nn.Module):
     def __init__(self, config: T5Config, has_relative_attention_bias: bool = False):
         super().__init__()
         self.layer = nn.ModuleList(
             [
-                T5TPLayerSelfAttention(config, has_relative_attention_bias),
-                T5TPLayerFF(config),
+                T5LayerSelfAttention(config, has_relative_attention_bias),
+                T5LayerFF(config),
             ]
         )
 
@@ -417,18 +373,12 @@ class T5TPBlock(nn.Module):
         return hidden_states, position_bias
 
 
-class T5TPStack(nn.Module):
-    """T5 encoder stack.
-
-    Named ``encoder`` in the parent model — matches ``encoder.block.*``,
-    ``encoder.final_layer_norm.*``, etc.
-    """
-
+class T5Stack(nn.Module):
     def __init__(self, config: T5Config, shared: nn.Embedding):
         super().__init__()
         self.embed_tokens = shared
         self.block = nn.ModuleList(
-            [T5TPBlock(config, has_relative_attention_bias=(i == 0)) for i in range(config.num_layers)]
+            [T5Block(config, has_relative_attention_bias=(i == 0)) for i in range(config.num_layers)]
         )
         self.final_layer_norm = T5LayerNorm(config.d_model, eps=config.layer_norm_epsilon)
 
@@ -458,51 +408,27 @@ class T5TPStack(nn.Module):
         return hidden_states
 
 
-class T5TPEncoderModel(nn.Module):
-    """Tensor-parallel T5 encoder model.
-
-    Drop-in replacement for ``transformers.T5EncoderModel`` that shards
-    attention heads and FFN intermediate dimensions across TP ranks using
-    vLLM parallel linear layers.
-
-    The module hierarchy mirrors HF exactly::
-
-        shared                                   (Embedding)
-        encoder.block.{i}.layer.0.SelfAttention  (T5TPSelfAttention)
-        encoder.block.{i}.layer.0.layer_norm     (T5LayerNorm)
-        encoder.block.{i}.layer.1.DenseReluDense (T5TPDenseGatedActDense / T5TPDenseActDense)
-        encoder.block.{i}.layer.1.layer_norm     (T5LayerNorm)
-        encoder.final_layer_norm                 (T5LayerNorm)
-
-    Weight loading relies on ``AutoWeightsLoader`` recursively dispatching
-    into child modules. Only ``T5TPSelfAttention`` and
-    ``T5TPDenseGatedActDense`` define ``load_weights()`` for QKV / gated-FFN
-    fusion; all other parameters are loaded directly by name.
-    """
+class T5EncoderModel(nn.Module):
+    """T5 encoder model applying upstream vLLM layers"""
 
     def __init__(self, config: T5Config):
         super().__init__()
         self.config = config
         self.shared = VocabParallelEmbedding(config.vocab_size, config.d_model)
-        self.encoder = T5TPStack(config, self.shared)
+        self.encoder = T5Stack(config, self.shared)
 
     @property
     def dtype(self) -> torch.dtype:
-        return self.shared.weight.dtype
+        return next(self.parameters()).dtype
 
     @property
     def device(self) -> torch.device:
-        return self.shared.weight.device
+        return next(self.parameters()).device
 
     def forward(
         self,
         input_ids: torch.Tensor,
         attention_mask: torch.Tensor | None = None,
-        output_hidden_states: bool = False,
     ) -> tuple[torch.Tensor, ...]:
-        """Forward pass matching HF T5EncoderModel output format.
-
-        Returns a tuple where the first element is ``last_hidden_state``.
-        """
         hidden_states = self.encoder(input_ids, attention_mask=attention_mask)
         return (hidden_states,)
