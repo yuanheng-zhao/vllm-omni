@@ -42,6 +42,7 @@ class T5SelfAttention(nn.Module):
         self,
         config: T5Config,
         has_relative_attention_bias: bool = False,
+        prefix: str = "",
     ):
         super().__init__()
         self.d_model = config.d_model
@@ -195,7 +196,7 @@ class T5SelfAttention(nn.Module):
             lookup_name = name
 
             for param_name, weight_name, shard_id in stacked_params_mapping:
-                if weight_name not in original_name:
+                if f"{weight_name}." not in original_name:
                     continue
                 lookup_name = original_name.replace(weight_name, param_name)
                 if lookup_name not in params_dict:
@@ -205,9 +206,9 @@ class T5SelfAttention(nn.Module):
                 weight_loader(param, loaded_weight, shard_id)
                 break
             else:
-                if lookup_name not in params_dict:
+                if name not in params_dict:
                     continue
-                param = params_dict[lookup_name]
+                param = params_dict[name]
                 weight_loader = getattr(param, "weight_loader", default_weight_loader)
                 weight_loader(param, loaded_weight)
 
@@ -218,7 +219,7 @@ class T5SelfAttention(nn.Module):
 
 
 class T5DenseGatedActDense(nn.Module):
-    def __init__(self, config: T5Config):
+    def __init__(self, config: T5Config, prefix: str = ""):
         super().__init__()
         self.wi = MergedColumnParallelLinear(
             config.d_model,
@@ -268,9 +269,9 @@ class T5DenseGatedActDense(nn.Module):
                 weight_loader(param, loaded_weight, shard_id)
                 break
             else:
-                if lookup_name not in params_dict:
+                if name not in params_dict:
                     continue
-                param = params_dict[lookup_name]
+                param = params_dict[name]
                 weight_loader = getattr(param, "weight_loader", default_weight_loader)
                 weight_loader(param, loaded_weight)
 
@@ -281,7 +282,7 @@ class T5DenseGatedActDense(nn.Module):
 
 
 class T5DenseActDense(nn.Module):
-    def __init__(self, config: T5Config):
+    def __init__(self, config: T5Config, prefix: str = ""):
         super().__init__()
         self.wi = ColumnParallelLinear(
             config.d_model,
@@ -307,10 +308,9 @@ class T5DenseActDense(nn.Module):
 
 
 class T5LayerSelfAttention(nn.Module):
-    # TODO: consider
-    def __init__(self, config: T5Config, has_relative_attention_bias: bool = False):
+    def __init__(self, config: T5Config, has_relative_attention_bias: bool = False, prefix: str = ""):
         super().__init__()
-        self.SelfAttention = T5SelfAttention(config, has_relative_attention_bias)
+        self.SelfAttention = T5SelfAttention(config, has_relative_attention_bias, prefix=f"{prefix}.SelfAttention")
         self.layer_norm = T5LayerNorm(config.d_model, eps=config.layer_norm_epsilon)
 
     def forward(
@@ -332,12 +332,12 @@ class T5LayerSelfAttention(nn.Module):
 
 
 class T5LayerFF(nn.Module):
-    def __init__(self, config: T5Config):
+    def __init__(self, config: T5Config, prefix: str = ""):
         super().__init__()
         if config.is_gated_act:
-            self.DenseReluDense = T5DenseGatedActDense(config)
+            self.DenseReluDense = T5DenseGatedActDense(config, prefix=f"{prefix}.DenseReluDense")
         else:
-            self.DenseReluDense = T5DenseActDense(config)
+            self.DenseReluDense = T5DenseActDense(config, prefix=f"{prefix}.DenseReluDense")
         self.layer_norm = T5LayerNorm(config.d_model, eps=config.layer_norm_epsilon)
 
     def forward(self, hidden_states: torch.Tensor) -> torch.Tensor:
@@ -353,12 +353,12 @@ class T5LayerFF(nn.Module):
 
 
 class T5Block(nn.Module):
-    def __init__(self, config: T5Config, has_relative_attention_bias: bool = False):
+    def __init__(self, config: T5Config, has_relative_attention_bias: bool = False, prefix: str = ""):
         super().__init__()
         self.layer = nn.ModuleList(
             [
-                T5LayerSelfAttention(config, has_relative_attention_bias),
-                T5LayerFF(config),
+                T5LayerSelfAttention(config, has_relative_attention_bias, prefix=f"{prefix}.layer.0"),
+                T5LayerFF(config, prefix=f"{prefix}.layer.1"),
             ]
         )
 
@@ -374,11 +374,14 @@ class T5Block(nn.Module):
 
 
 class T5Stack(nn.Module):
-    def __init__(self, config: T5Config, shared: nn.Embedding):
+    def __init__(self, config: T5Config, shared: nn.Embedding, prefix: str = ""):
         super().__init__()
         self.embed_tokens = shared
         self.block = nn.ModuleList(
-            [T5Block(config, has_relative_attention_bias=(i == 0)) for i in range(config.num_layers)]
+            [
+                T5Block(config, has_relative_attention_bias=(i == 0), prefix=f"{prefix}.block.{i}")
+                for i in range(config.num_layers)
+            ]
         )
         self.final_layer_norm = T5LayerNorm(config.d_model, eps=config.layer_norm_epsilon)
 
@@ -411,11 +414,11 @@ class T5Stack(nn.Module):
 class T5EncoderModel(nn.Module):
     """T5 encoder model applying upstream vLLM layers"""
 
-    def __init__(self, config: T5Config):
+    def __init__(self, config: T5Config, prefix: str = ""):
         super().__init__()
         self.config = config
         self.shared = VocabParallelEmbedding(config.vocab_size, config.d_model)
-        self.encoder = T5Stack(config, self.shared)
+        self.encoder = T5Stack(config, self.shared, prefix=f"{prefix}.encoder")
 
     @property
     def dtype(self) -> torch.dtype:
