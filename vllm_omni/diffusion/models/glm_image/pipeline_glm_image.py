@@ -29,7 +29,10 @@ from diffusers.schedulers.scheduling_flow_match_euler_discrete import (
 )
 from diffusers.utils.torch_utils import randn_tensor
 from torch import nn
-from transformers import AutoConfig, ByT5Tokenizer
+from transformers import (
+    ByT5Tokenizer,
+    T5EncoderModel,
+)
 
 from vllm_omni.diffusion.data import DiffusionOutput, OmniDiffusionConfig
 from vllm_omni.diffusion.distributed.parallel_state import (
@@ -43,7 +46,6 @@ from vllm_omni.diffusion.models.glm_image.glm_image_transformer import (
     GlmImageKVCache,
     GlmImageTransformer2DModel,
 )
-from vllm_omni.diffusion.models.t5_encoder import T5EncoderModel
 from vllm_omni.diffusion.request import OmniDiffusionRequest
 from vllm_omni.inputs.data import OmniTextPrompt
 from vllm_omni.model_executor.model_loader.weight_utils import (
@@ -278,9 +280,12 @@ class GlmImagePipeline(nn.Module):
 
         # Load text encoder (T5 for glyph embeddings)
         logger.info("Loading T5EncoderModel (glyph encoder)...")
-        t5_config = AutoConfig.from_pretrained(model_path, subfolder="text_encoder", local_files_only=True)
-        self.text_encoder = T5EncoderModel(t5_config, prefix="text_encoder")
-
+        self.text_encoder = T5EncoderModel.from_pretrained(
+            model_path,
+            subfolder="text_encoder",
+            local_files_only=True,
+            torch_dtype=torch.bfloat16,
+        ).to(self.device)
         self.text_encoder.eval()
 
         # Load tokenizer for glyph encoding
