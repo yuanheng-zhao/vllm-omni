@@ -179,44 +179,6 @@ class T5SelfAttention(nn.Module):
 
         return attn_output, position_bias
 
-    def load_weights(self, weights: Iterable[tuple[str, torch.Tensor]]) -> set[str]:
-        # load weights with QKV fusion via stacked_params_mapping
-        stacked_params_mapping = [
-            # (param_name, weight_name, shard_id)
-            ("qkv_proj", "q", "q"),
-            ("qkv_proj", "k", "k"),
-            ("qkv_proj", "v", "v"),
-        ]
-
-        params_dict = dict(self.named_parameters())
-        loaded_params: set[str] = set()
-
-        for name, loaded_weight in weights:
-            original_name = name
-            lookup_name = name
-
-            for param_name, weight_name, shard_id in stacked_params_mapping:
-                if f"{weight_name}." not in original_name:
-                    continue
-                lookup_name = original_name.replace(weight_name, param_name)
-                if lookup_name not in params_dict:
-                    continue
-                param = params_dict[lookup_name]
-                weight_loader = param.weight_loader
-                weight_loader(param, loaded_weight, shard_id)
-                break
-            else:
-                if name not in params_dict:
-                    continue
-                param = params_dict[name]
-                weight_loader = getattr(param, "weight_loader", default_weight_loader)
-                weight_loader(param, loaded_weight)
-
-            loaded_params.add(original_name)
-            loaded_params.add(lookup_name)
-
-        return loaded_params
-
 
 class T5DenseGatedActDense(nn.Module):
     def __init__(self, config: T5Config, prefix: str = ""):
@@ -243,42 +205,6 @@ class T5DenseGatedActDense(nn.Module):
         hidden_states = self.act(gate) * up
         hidden_states = self.wo(hidden_states)
         return hidden_states
-
-    def load_weights(self, weights: Iterable[tuple[str, torch.Tensor]]) -> set[str]:
-        # Load weights with wi_0/wi_1 fusion
-        stacked_params_mapping = [
-            ("wi", "wi_0", 0),
-            ("wi", "wi_1", 1),
-        ]
-
-        params_dict = dict(self.named_parameters())
-        loaded_params: set[str] = set()
-
-        for name, loaded_weight in weights:
-            original_name = name
-            lookup_name = name
-
-            for param_name, weight_name, shard_id in stacked_params_mapping:
-                if weight_name not in original_name:
-                    continue
-                lookup_name = original_name.replace(weight_name, param_name)
-                if lookup_name not in params_dict:
-                    continue
-                param = params_dict[lookup_name]
-                weight_loader = param.weight_loader
-                weight_loader(param, loaded_weight, shard_id)
-                break
-            else:
-                if name not in params_dict:
-                    continue
-                param = params_dict[name]
-                weight_loader = getattr(param, "weight_loader", default_weight_loader)
-                weight_loader(param, loaded_weight)
-
-            loaded_params.add(original_name)
-            loaded_params.add(lookup_name)
-
-        return loaded_params
 
 
 class T5DenseActDense(nn.Module):
@@ -438,3 +364,41 @@ class T5EncoderModel(nn.Module):
     ) -> tuple[torch.Tensor, ...]:
         hidden_states = self.encoder(input_ids, attention_mask=attention_mask)
         return (hidden_states,)
+
+    def load_weights(self, weights: Iterable[tuple[str, torch.Tensor]]) -> set[str]:
+        stacked_params_mapping = [
+            ("qkv_proj", "q", "q"),
+            ("qkv_proj", "k", "k"),
+            ("qkv_proj", "v", "v"),
+            ("wi", "wi_0", 0),
+            ("wi", "wi_1", 1),
+        ]
+
+        params_dict = dict(self.named_parameters())
+        loaded_params: set[str] = set()
+
+        for name, loaded_weight in weights:
+            original_name = name
+            lookup_name = name
+
+            for param_name, weight_name, shard_id in stacked_params_mapping:
+                if f".{weight_name}." not in name:
+                    continue
+                lookup_name = name.replace(weight_name, param_name)
+                if lookup_name not in params_dict:
+                    continue
+                param = params_dict[lookup_name]
+                weight_loader = param.weight_loader
+                weight_loader(param, loaded_weight, shard_id)
+                break
+            else:
+                if name not in params_dict:
+                    continue
+                param = params_dict[name]
+                weight_loader = getattr(param, "weight_loader", default_weight_loader)
+                weight_loader(param, loaded_weight)
+
+            loaded_params.add(original_name)
+            loaded_params.add(lookup_name)
+
+        return loaded_params
