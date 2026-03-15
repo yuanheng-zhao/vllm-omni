@@ -11,6 +11,7 @@ import torch.nn.functional as F
 from transformers import T5Config
 from vllm.distributed import get_tensor_model_parallel_rank, get_tensor_model_parallel_world_size
 from vllm.model_executor.layers.activation import get_act_fn
+from vllm.model_executor.layers.layernorm import RMSNorm
 from vllm.model_executor.layers.linear import (
     ColumnParallelLinear,
     MergedColumnParallelLinear,
@@ -19,22 +20,6 @@ from vllm.model_executor.layers.linear import (
 )
 from vllm.model_executor.layers.vocab_parallel_embedding import VocabParallelEmbedding
 from vllm.model_executor.model_loader.weight_utils import default_weight_loader
-
-
-class T5LayerNorm(nn.Module):
-    """T5-style RMSNorm (no bias, no mean subtraction)."""
-
-    def __init__(self, hidden_size: int, eps: float = 1e-6):
-        super().__init__()
-        self.weight = nn.Parameter(torch.ones(hidden_size))
-        self.variance_epsilon = eps
-
-    def forward(self, hidden_states: torch.Tensor) -> torch.Tensor:
-        variance = hidden_states.to(torch.float32).pow(2).mean(-1, keepdim=True)
-        hidden_states = hidden_states * torch.rsqrt(variance + self.variance_epsilon)
-        if self.weight.dtype in (torch.float16, torch.bfloat16):
-            hidden_states = hidden_states.to(self.weight.dtype)
-        return self.weight * hidden_states
 
 
 class T5SelfAttention(nn.Module):
@@ -237,7 +222,7 @@ class T5LayerSelfAttention(nn.Module):
     def __init__(self, config: T5Config, has_relative_attention_bias: bool = False, prefix: str = ""):
         super().__init__()
         self.SelfAttention = T5SelfAttention(config, has_relative_attention_bias, prefix=f"{prefix}.SelfAttention")
-        self.layer_norm = T5LayerNorm(config.d_model, eps=config.layer_norm_epsilon)
+        self.layer_norm = RMSNorm(config.d_model, eps=config.layer_norm_epsilon)
 
     def forward(
         self,
@@ -264,7 +249,7 @@ class T5LayerFF(nn.Module):
             self.DenseReluDense = T5DenseGatedActDense(config, prefix=f"{prefix}.DenseReluDense")
         else:
             self.DenseReluDense = T5DenseActDense(config, prefix=f"{prefix}.DenseReluDense")
-        self.layer_norm = T5LayerNorm(config.d_model, eps=config.layer_norm_epsilon)
+        self.layer_norm = RMSNorm(config.d_model, eps=config.layer_norm_epsilon)
 
     def forward(self, hidden_states: torch.Tensor) -> torch.Tensor:
         normed = self.layer_norm(hidden_states)
@@ -309,7 +294,7 @@ class T5Stack(nn.Module):
                 for i in range(config.num_layers)
             ]
         )
-        self.final_layer_norm = T5LayerNorm(config.d_model, eps=config.layer_norm_epsilon)
+        self.final_layer_norm = RMSNorm(config.d_model, eps=config.layer_norm_epsilon)
 
     def forward(
         self,
