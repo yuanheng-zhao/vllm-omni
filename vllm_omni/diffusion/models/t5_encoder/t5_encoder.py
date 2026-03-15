@@ -428,6 +428,9 @@ class T5EncoderModel(nn.Module):
     def device(self) -> torch.device:
         return next(self.parameters()).device
 
+    def embed_input_ids(self, input_ids: torch.Tensor) -> torch.Tensor:
+        return self.shared(input_ids)
+
     def forward(
         self,
         input_ids: torch.Tensor,
