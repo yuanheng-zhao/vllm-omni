@@ -43,6 +43,8 @@ from vllm.model_executor.layers.linear import (
 )
 from vllm.model_executor.layers.logits_processor import LogitsProcessor
 from vllm.model_executor.layers.quantization import QuantizationConfig
+from vllm.model_executor.layers.rotary_embedding import get_rope
+from vllm.model_executor.layers.rotary_embedding.mrope import MRotaryEmbedding
 from vllm.model_executor.layers.vocab_parallel_embedding import ParallelLMHead, VocabParallelEmbedding
 from vllm.model_executor.model_loader.weight_utils import default_weight_loader
 from vllm.model_executor.models.utils import (
@@ -65,180 +67,107 @@ from .modeling_utils import build_modality_mask, patch_continuous_features
 logger = init_logger(__name__)
 
 
-class BailingMoeV2RotaryEmbedding3D(nn.Module):
-    def __init__(self, config: BailingMoeV2Config):
-        super().__init__()
-        self.rope_init_type = "default"
-        self.rope_type = (
-            config.rope_scaling.get("rope_type", config.rope_scaling.get("type")) if config.rope_scaling else "default"
-        )
-        self.max_seq_len_cached = config.max_position_embeddings
-        self.original_max_seq_len = config.max_position_embeddings
-        self.config = config
+class MingVideoRopeMRotaryEmbedding(MRotaryEmbedding):
+    """MRotaryEmbedding with Ming's video_rope cos/sin interleaving.
 
-        from transformers.modeling_rope_utils import ROPE_INIT_FUNCTIONS
+    Unlike standard mrope which maps contiguous frequency sections to T/H/W,
+    video_rope alternates H/W frequencies element-wise in the spatial section
+    and places temporal frequencies at the end:
+        Standard mrope:  [T T T ... H H H ... W W W ...]
+        Video rope:      [H W H W ... H W ... T T T ...]
 
-        self.rope_init_fn = ROPE_INIT_FUNCTIONS[self.rope_init_type]
-        inv_freq, self.attention_scaling = self.rope_init_fn(self.config, device=None)
+    Refer to Ming's BailingMoeV2RotaryEmbedding3D
+    https://github.com/inclusionAI/Ming/blob/2a0c02ae3130190160c215f89fce7de3005db483/modeling_bailing_moe_v2.py#L174
+    """
 
-        # Initialize inv_freq manually for multimodal case
-        # if hasattr(config, "head_dim") and config.head_dim:
-        #     dim = config.head_dim
-        # else:
-        #     dim = config.hidden_size // config.num_attention_heads
-        # partial_rotary_factor = config.partial_rotary_factor if hasattr(config, "partial_rotary_factor") else 1.0
-        # rotary_dim = int(dim * partial_rotary_factor)
-        # inv_freq = 1.0 / (
-        #     config.rope_theta ** (torch.arange(0, rotary_dim, 2, dtype=torch.float) / rotary_dim)
-        # )
-        # self.attention_scaling = 1.0
-
-        self.register_buffer("inv_freq", inv_freq, persistent=False)
-        self.original_inv_freq = self.inv_freq
-
-    def forward(self, x, position_ids) -> tuple[torch.Tensor, torch.Tensor]:
-        """Forward pass for 3D rotary embeddings.
+    def _remap_video_rope(
+        self,
+        cos: torch.Tensor,
+        sin: torch.Tensor,
+    ) -> tuple[torch.Tensor, torch.Tensor]:
+        """Remap 3D cos/sin to video_rope interleaved layout.
 
         Args:
-            x: Input tensor
-            position_ids: Position IDs, shape (3, batch, seq_len) for 3D rope or (batch, seq_len) for 1D
-
+            cos, sin: [3, num_tokens, rotary_dim // 2]
         Returns:
-            Tuple of (cos, sin) tensors
+            cos, sin: [num_tokens, rotary_dim // 2]
+
+        Refer to Ming's apply_3d_rotary_pos_emb
+        https://github.com/inclusionAI/Ming/blob/2a0c02ae3130190160c215f89fce7de3005db483/modeling_bailing_moe_v2.py#L226
         """
-        if self.rope_type == "3D" or self.rope_type == "video_rope":
-            # 3D rope: position_ids shape is (3, batch, seq_len)
-            inv_freq_expanded = (
-                self.inv_freq[None, None, :, None].float().expand(3, position_ids.shape[1], -1, 1).to(x.device)
-            )
-            position_ids_expanded = position_ids[:, :, None, :].float()
-        else:
-            # 1D rope: position_ids shape is (batch, seq_len) or (3, batch, seq_len) with same values
-            if len(position_ids.shape) == 3:
-                position_ids = position_ids[0]
-            inv_freq_expanded = self.inv_freq[None, :, None].float().expand(position_ids.shape[0], -1, 1).to(x.device)
-            position_ids_expanded = position_ids[:, None, :].float()
+        assert self.mrope_section is not None
+        hw_size = self.mrope_section[1] + self.mrope_section[2]
 
-        device_type = x.device.type if isinstance(x.device.type, str) and x.device.type != "mps" else "cpu"
-        with torch.autocast(device_type=device_type, enabled=False):  # Force float32
-            if self.rope_type == "3D" or self.rope_type == "video_rope":
-                freqs = (inv_freq_expanded.float() @ position_ids_expanded.float()).transpose(2, 3)
-            else:
-                freqs = (inv_freq_expanded.float() @ position_ids_expanded.float()).transpose(1, 2)
-            emb = torch.cat((freqs, freqs), dim=-1)
-            cos = emb.cos() * self.attention_scaling
-            sin = emb.sin() * self.attention_scaling
+        result_cos = torch.empty_like(cos[0])
+        result_sin = torch.empty_like(sin[0])
 
-        return cos.to(dtype=x.dtype), sin.to(dtype=x.dtype)
+        # Spatial frequencies: even indices from H (dim 1), odd from W (dim 2)
+        result_cos[:, 0:hw_size:2] = cos[1, :, 0:hw_size:2]
+        result_cos[:, 1:hw_size:2] = cos[2, :, 1:hw_size:2]
+        result_sin[:, 0:hw_size:2] = sin[1, :, 0:hw_size:2]
+        result_sin[:, 1:hw_size:2] = sin[2, :, 1:hw_size:2]
 
+        # Temporal frequencies at the end
+        result_cos[:, hw_size:] = cos[0, :, hw_size:]
+        result_sin[:, hw_size:] = sin[0, :, hw_size:]
 
-# Copied from transformers.models.llama.modeling_llama.rotate_half
-def rotate_half(x):
-    """Rotates half the hidden dims of the input."""
-    x1 = x[..., : x.shape[-1] // 2]
-    x2 = x[..., x.shape[-1] // 2 :]
-    return torch.cat((-x2, x1), dim=-1)
+        return result_cos, result_sin
 
+    def forward_native(
+        self,
+        positions: torch.Tensor,
+        query: torch.Tensor,
+        key: torch.Tensor | None = None,
+        offsets: torch.Tensor | None = None,
+    ) -> tuple[torch.Tensor, torch.Tensor | None]:
+        assert positions.ndim == 1 or positions.ndim == 2
+        assert key is not None
 
-def apply_3d_rotary_pos_emb(
-    q,
-    k,
-    cos,
-    sin,
-    mrope_section=[8, 12, 12],
-    unsqueeze_dim=1,
-    rope_type="m_rope",
-    rotary_half=True,
-) -> tuple[torch.Tensor, torch.Tensor]:
-    """Applies Rotary Position Embedding with Multimodal Sections to the query and key tensors (https://qwenlm.github.io/blog/qwen2-vl/).
-    Explanation:
-        Multimodal 3D rotary position embedding is an extension to 1D rotary position embedding. The input embedding
-        sequence contains vision (images / videos) embedding and text embedding or just contains text embedding. For
-        vision embedding part, we apply rotary position embedding on temporal, height and width dimension separately.
-        Here we split the channel dimension to 3 chunks for the temporal, height and width rotary position embedding.
-        For text embedding part, we just apply 1D rotary position embedding. The three rotary position index (temporal,
-        height and width) of text embedding is always the same, so the text embedding rotary position embedding has no
-        difference with modern LLMs.
-    Args:
-        q (`torch.Tensor`): The query tensor.
-        k (`torch.Tensor`): The key tensor.
-        cos (`torch.Tensor`): The cosine part of the rotary embedding.
-        sin (`torch.Tensor`): The sine part of the rotary embedding.
-        mrope_section(`List(int)`):
-            Multimodal rope section is for channel dimension of temporal, height and width in rope calculation.
-        unsqueeze_dim (`int`, *optional*, defaults to 1):
-            The 'unsqueeze_dim' argument specifies the dimension along which to unsqueeze cos[position_ids] and
-            sin[position_ids] so that they can be properly broadcasted to the dimensions of q and k. For example, note
-            that cos[position_ids] and sin[position_ids] have the shape [batch_size, seq_len, head_dim]. Then, if q and
-            k have the shape [batch_size, heads, seq_len, head_dim], then setting unsqueeze_dim=1 makes
-            cos[position_ids] and sin[position_ids] broadcastable to the shapes of q and k. Similarly, if q and k have
-            the shape [batch_size, seq_len, heads, head_dim], then set unsqueeze_dim=2.
-        rope_type (`str`, *optional*, defaults to "m_rope"):
-        rotary_half (`bool`, *optional*, defaults to `False`): Keep half or full tensor for later concatenation
-    Returns:
-        `tuple(torch.Tensor)` comprising the query and key tensors rotated using the Rotary Position Embedding.
-    """
-    if rope_type == "3D":  # rename rope_type
-        rope_type = "m_rope"
+        cos_sin_cache = self._match_cos_sin_cache_dtype(query)
+        num_tokens = positions.shape[-1]
+        cos_sin = cos_sin_cache[positions]
+        cos, sin = cos_sin.chunk(2, dim=-1)
 
-    if rope_type == "m_rope":
-        mrope_section = mrope_section * 2
-        cos = (
-            torch.cat([m[i % 3] for i, m in enumerate(cos.split(mrope_section, dim=-1))], dim=-1)
-            .unsqueeze(unsqueeze_dim)
-            .to(q.device)
-        )
-        sin = (
-            torch.cat([m[i % 3] for i, m in enumerate(sin.split(mrope_section, dim=-1))], dim=-1)
-            .unsqueeze(unsqueeze_dim)
-            .to(q.device)
-        )
-    elif rope_type == "video_rope":
-        mrope_section = list(mrope_section)
-        mrope_section = [mrope_section[0], mrope_section[1] + mrope_section[2]]
-        mrope_section = mrope_section * 2
-        # adjust t last -> (48, 16, 48, 16)
-        mrope_section = mrope_section[::-1]
-        index = 0
-        result_cos = []
-        result_sin = []
-        # get x1, y1, x2, y2, ..., t1, t2, ...
-        for i, section in enumerate(mrope_section):
-            if i % 2 == 0:
-                for j in range(section):
-                    row = 1 if j % 2 == 0 else 2
-                    result_cos.append(cos[row, ..., index : index + 1])
-                    result_sin.append(sin[row, ..., index : index + 1])
-                    index += 1
-            else:
-                result_cos.append(cos[0, ..., index : index + section])
-                result_sin.append(sin[0, ..., index : index + section])
-                index += section
-        cos, sin = (
-            torch.cat(result_cos, dim=-1).unsqueeze(dim=unsqueeze_dim).to(q.device),
-            torch.cat(result_sin, dim=-1).unsqueeze(dim=unsqueeze_dim).to(q.device),
-        )
-    else:  # vanilla rope for llm
-        cos = cos.unsqueeze(unsqueeze_dim).to(q.device)
-        sin = sin.unsqueeze(unsqueeze_dim).to(q.device)
+        if positions.ndim == 2:
+            cos, sin = self._remap_video_rope(cos, sin)
 
-    if rotary_half:
-        rotary_dim = cos.shape[-1]
-        q_rot, q_pass = q[..., :rotary_dim], q[..., rotary_dim:]
-        k_rot, k_pass = k[..., :rotary_dim], k[..., rotary_dim:]
+        query_shape = query.shape
+        query = query.view(num_tokens, -1, self.head_size)
+        query_rot = query[..., : self.rotary_dim]
+        query_pass = query[..., self.rotary_dim :]
+        query_rot = self.apply_rotary_emb.forward_native(query_rot, cos, sin)
+        query = torch.cat((query_rot, query_pass), dim=-1).reshape(query_shape)
 
-        # Apply rotary embeddings on the first half
-        q_embed = (q_rot * cos) + (rotate_half(q_rot) * sin)
-        k_embed = (k_rot * cos) + (rotate_half(k_rot) * sin)
+        key_shape = key.shape
+        key = key.view(num_tokens, -1, self.head_size)
+        key_rot = key[..., : self.rotary_dim]
+        key_pass = key[..., self.rotary_dim :]
+        key_rot = self.apply_rotary_emb.forward_native(key_rot, cos, sin)
+        key = torch.cat((key_rot, key_pass), dim=-1).reshape(key_shape)
 
-        # Concatenate back to full shape
-        q_embed = torch.cat([q_embed, q_pass], dim=-1)
-        k_embed = torch.cat([k_embed, k_pass], dim=-1)
-    else:
-        q_embed = (q * cos) + (rotate_half(q) * sin)
-        k_embed = (k * cos) + (rotate_half(k) * sin)
+        return query, key
 
-    return q_embed, k_embed
+    def forward_cuda(
+        self,
+        positions: torch.Tensor,
+        query: torch.Tensor,
+        key: torch.Tensor | None = None,
+        offsets: torch.Tensor | None = None,
+    ) -> tuple[torch.Tensor, torch.Tensor | None]:
+        # No custom Triton kernel for video_rope; fall back to native for 3D
+        # TODO: Consider custom optimization
+        if positions.ndim == 2:
+            return self.forward_native(positions, query, key, offsets)
+        return super().forward_cuda(positions, query, key, offsets)
+
+    def forward_cpu(
+        self,
+        positions: torch.Tensor,
+        query: torch.Tensor,
+        key: torch.Tensor | None = None,
+        offsets: torch.Tensor | None = None,
+    ) -> tuple[torch.Tensor, torch.Tensor | None]:
+        return self.forward_native(positions, query, key, offsets)
 
 
 def get_t_scale_rope_index(
@@ -909,12 +838,38 @@ class BailingMoeV2Attention(nn.Module):
         self.k_norm = RMSNorm(self.head_dim, eps=config.rms_norm_eps)
 
         # 3D Rotary embeddings for multimodal
-        if config.rope_scaling is not None:
-            self.rotary_emb = BailingMoeV2RotaryEmbedding3D(config)
-            self.rope_type = config.rope_scaling.get("rope_type", config.rope_scaling.get("type"))
-            self.mrope_section = config.rope_scaling.get("mrope_section", [8, 12, 12])
-        else:
+        if config.rope_scaling is None:
             raise ValueError("rope_scaling must not be None")
+
+        rope_type = config.rope_scaling.get("rope_type", config.rope_scaling.get("type"))
+        mrope_section = config.rope_scaling.get("mrope_section", [8, 12, 12])
+
+        if rope_type == "video_rope":
+            # Ming-specific video_rope with custom H/W interleaving
+            self.rotary_emb = MingVideoRopeMRotaryEmbedding(
+                head_size=self.head_dim,
+                rotary_dim=self.rope_dim,
+                max_position_embeddings=config.max_position_embeddings,
+                base=config.rope_theta,
+                is_neox_style=True,
+                dtype=torch.get_default_dtype(),
+                mrope_section=mrope_section,
+            )
+        else:
+            # Standard m_rope (rope_type "3D", "default", or None)
+            rope_scaling = dict(config.rope_scaling)
+            rope_scaling["rope_type"] = "default"  # normalize for get_rope dispatch
+            rope_scaling["mrope_section"] = mrope_section
+            self.rotary_emb = get_rope(
+                head_size=self.head_dim,
+                max_position=config.max_position_embeddings,
+                is_neox_style=True,
+                rope_parameters={
+                    "rope_theta": config.rope_theta,
+                    "partial_rotary_factor": config.partial_rotary_factor,
+                    **rope_scaling,
+                },
+            )
 
         self.attn = Attention(
             self.num_heads,
@@ -950,33 +905,8 @@ class BailingMoeV2Attention(nn.Module):
         q = self.q_norm(q.view(num_tokens, self.num_heads, self.head_dim)).view(num_tokens, self.q_size)
         k = self.k_norm(k.view(num_tokens, self.num_kv_heads, self.head_dim)).view(num_tokens, self.kv_size)
 
-        # Apply 3D rotary embeddings
-        # Reshape positions to (3, 1, num_tokens) to match rope's expected (3, batch, seq_len)
-        if positions.ndim == 2:
-            positions_3d = positions.unsqueeze(1)
-        else:
-            positions_3d = positions.unsqueeze(0).unsqueeze(0).expand(3, 1, -1)
-
-        cos, sin = self.rotary_emb(hidden_states, positions_3d)
-
-        # Reshape q, k for rope: [num_tokens, size] -> [1, num_tokens, heads, head_dim]
-        q = q.view(1, num_tokens, self.num_heads, self.head_dim)
-        k = k.view(1, num_tokens, self.num_kv_heads, self.head_dim)
-
-        q, k = apply_3d_rotary_pos_emb(
-            q,
-            k,
-            cos,
-            sin,
-            mrope_section=self.mrope_section,
-            unsqueeze_dim=2,
-            rope_type=self.rope_type,
-            rotary_half=(self.rope_dim < self.head_dim),
-        )
-
-        # Reshape back to [num_tokens, size] for vLLM attention
-        q = q.view(num_tokens, self.q_size)
-        k = k.view(num_tokens, self.kv_size)
+        # Apply rotary embeddings
+        q, k = self.rotary_emb(positions, q, k)
 
         # vLLM attention (handles KV cache, paged attention, etc.)
         attn_output = self.attn(q, k, v)
@@ -1159,12 +1089,6 @@ class BailingMoeV2Model(nn.Module):
             self.norm = RMSNorm(config.hidden_size, eps=config.rms_norm_eps)
         else:
             self.norm = PPMissingLayer()
-
-        # 3D Rotary embeddings
-        if config.rope_scaling is not None:
-            self.rotary_emb = BailingMoeV2RotaryEmbedding3D(config=config)
-        else:
-            raise ValueError("rope_scaling must not be None")
 
         # Multimodal config
         # XXX: The original impl hardcoded the following settings to BailingMoeV2Config
