@@ -90,9 +90,7 @@ class MultiHeadAttention(nn.Module):
         if self.use_flash_attn and cu_seqlens is not None and q.dtype in [torch.float16, torch.bfloat16]:
             try:
                 max_seqlen = (cu_seqlens[1:] - cu_seqlens[:-1]).max().item()
-                attn_output = flash_attn_varlen_func(
-                    q, k, v, cu_seqlens, cu_seqlens, max_seqlen, max_seqlen, dropout_p=0.0
-                )
+                attn_output = flash_attn_varlen_func(q, k, v, cu_seqlens, cu_seqlens, max_seqlen, max_seqlen)
             except Exception as e:
                 logger.warning(f"Flash attention varlen failed ({e}), falling back to manual")
                 self.use_flash_attn = False  # Disable for future calls
@@ -135,10 +133,12 @@ class MultiHeadAttention(nn.Module):
         k_padded = k_padded.transpose(1, 2)
         v_padded = v_padded.transpose(1, 2)
 
-        # Create attention mask for variable lengths
-        attn_mask = torch.arange(max_seqlen, device=q.device)[None, :] < torch.tensor(seqlens, device=q.device)[:, None]
-        attn_mask = attn_mask.unsqueeze(1).unsqueeze(2)  # [B, 1, 1, T]
-        attn_mask = attn_mask.masked_fill(attn_mask == 0, -torch.finfo(q.dtype).max)
+        # Create attention mask for variable lengths: 0 for valid positions, -inf for padding
+        padding_mask = (
+            torch.arange(max_seqlen, device=q.device)[None, :] >= torch.tensor(seqlens, device=q.device)[:, None]
+        )
+        attn_mask = torch.zeros(batch_size, 1, 1, max_seqlen, dtype=q.dtype, device=q.device)
+        attn_mask = attn_mask.masked_fill(padding_mask.unsqueeze(1).unsqueeze(2), -torch.finfo(q.dtype).max)
 
         # Compute attention
         attn_scores = torch.matmul(q_padded, k_padded.transpose(-2, -1)) * scale
@@ -232,6 +232,11 @@ class WhisperAudioEncoder(nn.Module):
             [total_T', n_state] packed encoded audio features, where
             total_T' is the sum of all encoded sequence lengths
         """
+        # Cast inputs to model dtype at the boundary so all activations and
+        # parameters are consistent (avoids LayerNorm/Linear weight dtype mismatch).
+        target_dtype = self.conv1.weight.dtype
+        x_list = [x.to(target_dtype) for x in x_list]
+
         # Process each audio through conv layers and add positional embeddings
         encoded_list = []
         encoded_lens = []
@@ -266,36 +271,14 @@ class WhisperAudioEncoder(nn.Module):
         return x_packed
 
     def load_weights(self, weights: Iterable[tuple[str, torch.Tensor]]) -> set[str]:
-        """Load weights from HF checkpoint.
-
-        TODO: clean the following reference notes
-        "audio.blocks.9.attn.key.weight": "model-00001-of-00042.safetensors",
-        "audio.blocks.9.attn.out.bias": "model-00001-of-00042.safetensors",
-        "audio.blocks.9.attn.out.weight": "model-00001-of-00042.safetensors",
-        "audio.blocks.9.attn.query.bias": "model-00001-of-00042.safetensors",
-        "audio.blocks.9.attn.query.weight": "model-00001-of-00042.safetensors",
-        "audio.blocks.9.attn.value.bias": "model-00001-of-00042.safetensors",
-        "audio.blocks.9.attn.value.weight": "model-00001-of-00042.safetensors",
-        "audio.blocks.9.attn_ln.bias": "model-00001-of-00042.safetensors",
-        "audio.blocks.9.attn_ln.weight": "model-00001-of-00042.safetensors",
-        "audio.blocks.9.mlp.0.bias": "model-00001-of-00042.safetensors",
-        "audio.blocks.9.mlp.0.weight": "model-00001-of-00042.safetensors",
-        "audio.blocks.9.mlp.2.bias": "model-00001-of-00042.safetensors",
-        "audio.blocks.9.mlp.2.weight": "model-00001-of-00042.safetensors",
-        "audio.blocks.9.mlp_ln.bias": "model-00001-of-00042.safetensors",
-        "audio.blocks.9.mlp_ln.weight": "model-00001-of-00042.safetensors",
-        "audio.conv1.bias": "model-00001-of-00042.safetensors",
-        "audio.conv1.weight": "model-00001-of-00042.safetensors",
-        "audio.conv2.bias": "model-00001-of-00042.safetensors",
-        "audio.conv2.weight": "model-00001-of-00042.safetensors",
-        "audio.ln_post.bias": "model-00001-of-00042.safetensors",
-        "audio.ln_post.weight": "model-00001-of-00042.safetensors",
-        "audio.positional_embedding": "model-00001-of-00042.safetensors",
-        """
-        # Include both parameters and buffers (positional_embedding is a buffer)
-        params_dict = dict(self.named_parameters())
-        buffers_dict = dict(self.named_buffers())
-        params_dict.update(buffers_dict)
+        # Include both parameters and buffers (positional_embedding is a buffer).
+        # Use a single dict[str, Tensor] to avoid the type mismatch from merging
+        # named_parameters() into named_buffers() or vice versa.
+        # default_weight_loader (param.data.copy_) is correct for both.
+        params_dict: dict[str, torch.Tensor] = {
+            **dict(self.named_parameters(remove_duplicate=False)),
+            **dict(self.named_buffers()),
+        }
         loaded_params: set[str] = set()
 
         for name, loaded_weight in weights:
@@ -303,12 +286,8 @@ class WhisperAudioEncoder(nn.Module):
                 logger.warning("Skipping unknown audio encoder weight: %s", name)
                 continue
             param = params_dict[name]
-            if isinstance(param, torch.Tensor) and not isinstance(param, nn.Parameter):
-                # Buffer: copy data directly
-                param.data.copy_(loaded_weight)
-            else:
-                weight_loader = getattr(param, "weight_loader", default_weight_loader)
-                weight_loader(param, loaded_weight)
+            weight_loader = getattr(param, "weight_loader", default_weight_loader)
+            weight_loader(param, loaded_weight)
             loaded_params.add(name)
 
         return loaded_params

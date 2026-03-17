@@ -22,6 +22,9 @@ from vllm.model_executor.models.interfaces import (
     SupportsMultiModal,
     SupportsPP,
 )
+from vllm.model_executor.models.qwen2_5_vl import (
+    Qwen2_5_VLProcessingInfo,
+)
 from vllm.model_executor.models.utils import _merge_multimodal_embeddings, maybe_prefix
 from vllm.multimodal import MULTIMODAL_REGISTRY
 from vllm.multimodal.inputs import (
@@ -34,12 +37,12 @@ from vllm.multimodal.parse import (
     AudioProcessorItems,
     ImageProcessorItems,
     MultiModalDataItems,
+    MultiModalDataParser,
     VideoProcessorItems,
 )
 from vllm.multimodal.processing import (
     BaseDummyInputsBuilder,
     BaseMultiModalProcessor,
-    BaseProcessingInfo,
     PromptReplacement,
     PromptUpdate,
     PromptUpdateDetails,
@@ -49,7 +52,7 @@ from vllm.sequence import IntermediateTensors
 from vllm_omni.model_executor.custom_process_mixin import CustomProcessMixin
 from vllm_omni.model_executor.models.output_templates import OmniOutput
 from vllm_omni.transformers_utils.configs.ming_flash_omni import BailingMM2Config, MingFlashOmniThinkerConfig
-from vllm_omni.transformers_utils.processors.ming import MingFlashOmniProcessor
+from vllm_omni.transformers_utils.processors.ming import MingFlashOmniProcessor, MingWhisperFeatureExtractor
 
 from .components import (
     AudioProjector,
@@ -66,7 +69,7 @@ logger = init_logger(__name__)
 # === Multimodal Processor Classes === #
 
 
-class MingFlashOmniThinkerProcessingInfo(BaseProcessingInfo):
+class MingFlashOmniThinkerProcessingInfo(Qwen2_5_VLProcessingInfo):
     """Processing info for Ming-flash-omni Thinker stage.
 
     Provides access to HuggingFace config, processor, and tokenizer for
@@ -79,6 +82,13 @@ class MingFlashOmniThinkerProcessingInfo(BaseProcessingInfo):
 
     def get_hf_processor(self, **kwargs: object):
         return self.ctx.get_hf_processor(MingFlashOmniProcessor, **kwargs)
+
+    def get_target_channels(self) -> int:
+        """Return target audio channels (mono).
+
+        See `_normalize_audio_tensor` in vllm_omni/transformers_utils/processors/ming.py
+        """
+        return 1
 
     def get_supported_mm_limits(self) -> Mapping[str, int | None]:
         """Get supported multimodal limits.
@@ -93,19 +103,38 @@ class MingFlashOmniThinkerProcessingInfo(BaseProcessingInfo):
         seq_len: int,
         mm_counts: Mapping[str, int],
     ) -> Mapping[str, int]:
-        """Get maximum tokens per multimodal item.
+        mm_counts = mm_counts or {}
+        requested_modalities = {m for m, c in mm_counts.items() if c > 0}
+        mm_max_tokens: dict[str, int] = {}
 
-        For Ming-flash-omni:
-        - Images: Variable based on resolution, typically up to 1024 patches
-        - Videos: Variable based on frames and resolution
-        - Audio: Variable based on duration, up to ~3000 tokens for 30s audio
-        """
-        # Conservative estimates based on typical use cases
-        return {
-            "image": 1024,  # Covers most image resolutions
-            "video": 4096,  # Covers typical video clips
-            "audio": 3000,  # Covers up to 30s audio
-        }
+        if requested_modalities & {"image", "video"}:
+            vl_tokens = Qwen2_5_VLProcessingInfo.get_mm_max_tokens_per_item(
+                self,
+                seq_len=seq_len,
+                mm_counts=mm_counts,
+            )
+            mm_max_tokens.update({m: vl_tokens[m] for m in ["image", "video"] if m in requested_modalities})
+
+        if "audio" in requested_modalities:
+            # TODO: HARDCODED for now
+            mm_max_tokens["audio"] = 3000
+
+        return mm_max_tokens
+
+    def get_feature_extractor(self, **kwargs: object) -> MingWhisperFeatureExtractor:
+        hf_processor = self.get_hf_processor(**kwargs)
+        feature_extractor = hf_processor.audio_processor  # type: ignore
+        assert isinstance(feature_extractor, MingWhisperFeatureExtractor)
+
+        return feature_extractor
+
+    def get_data_parser(self):
+        feature_extractor = self.get_feature_extractor()
+        return MultiModalDataParser(
+            target_sr=feature_extractor.sampling_rate,
+            target_channels=self.get_target_channels(),
+            expected_hidden_size=self._get_expected_hidden_size(),
+        )
 
 
 class MingFlashOmniThinkerDummyInputsBuilder(BaseDummyInputsBuilder[MingFlashOmniThinkerProcessingInfo]):
