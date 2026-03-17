@@ -13,48 +13,16 @@
 # WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 # See the License for the specific language governing permissions and
 # limitations under the License.
-# Adapted from Ming-flash-omni 2.0 original implementation
 
-"""
-Simplified BailingMM2 Processor for vLLM-omni.
-
-This is a lightweight adaptation of the original Ming processing_bailingmm2.py
-for use with vLLM's multimodal infrastructure. It provides the essential
-processing capabilities needed for the Thinker stage.
-"""
-
-import logging
 from typing import Any
 
 import numpy as np
 import torch
-from transformers.feature_extraction_utils import BatchFeature
+from transformers import AutoFeatureExtractor, AutoProcessor
+from transformers.feature_extraction_utils import BatchFeature, FeatureExtractionMixin
 from transformers.processing_utils import ProcessorMixin
 from transformers.tokenization_utils_base import PreTokenizedInput, TextInput
 
-logger = logging.getLogger(__name__)
-
-# ---------------------------------------------------------------------------
-# Bundled preprocessor config values adapted from Ming's
-# preprocessor_config.json.  Used to construct sub-processors directly
-# when the HF model repo does not ship the processor files.
-# ---------------------------------------------------------------------------
-MING_IMAGE_PROCESSOR_KWARGS: dict[str, Any] = {
-    "min_pixels": 4096,
-    "max_pixels": 16777216,
-    "patch_size": 16,
-    "temporal_patch_size": 2,
-    "merge_size": 2,
-    "image_mean": [0.48145466, 0.4578275, 0.40821073],
-    "image_std": [0.26862954, 0.26130258, 0.27577711],
-}
-
-MING_AUDIO_PROCESSOR_KWARGS: dict[str, Any] = {
-    "sampling_rate": 16000,
-    "n_mels": 128,  # whisper frontend
-}
-
-# Token constants (from original Ming implementation)
 DEFAULT_IMAGE_PATCH_TOKEN = "<imagePatch>"
 DEFAULT_IM_START_TOKEN = "<image>"
 DEFAULT_IM_END_TOKEN = "</image>"
@@ -66,21 +34,18 @@ DEFAULT_AUDIO_PATCH_TOKEN = "<audioPatch>"
 DEFAULT_AU_START_TOKEN = "<audio>"
 DEFAULT_AU_END_TOKEN = "</audio>"
 
-# High-level placeholders in user prompts
+# High-level placeholders used in user prompts
 PLACEHOLDER_IMAGE_TOKEN_IN_TEXT = "<IMAGE>"
 PLACEHOLDER_VIDEO_TOKEN_IN_TEXT = "<VIDEO>"
 PLACEHOLDER_AUDIO_TOKEN_IN_TEXT = "<AUDIO>"
 
-# Chat template constants (from Ming)
+# Chat template constants
 USER_PREFIX = "<role>HUMAN</role>"
 ASSISTANT_PREFIX = "<role>ASSISTANT</role>"
 SYSTEM_PROMPT_NOTHINK = "<role>SYSTEM</role>你是一个友好的AI助手。\n\ndetailed thinking off"
 SYSTEM_PROMPT_THINK = "<role>SYSTEM</role>你是一个友好的AI助手。\n\ndetailed thinking on"
 
 
-# ---------------------------------------------------------------------------
-# Audio normalization helpers (from Ming's audio_processing_bailingmm2.py)
-# ---------------------------------------------------------------------------
 _NORM_FACTOR_FOR_DTYPE = {
     torch.int8: 2**7,
     torch.int16: 2**15,
@@ -114,37 +79,36 @@ def _normalize_audio_tensor(
     return waveform
 
 
-class MingWhisperAudioProcessor:
-    """Lightweight audio processor using Whisper's log-mel spectrogram.
+class MingWhisperFeatureExtractor(FeatureExtractionMixin):
+    """Whisper log-mel feature extractor for Ming-flash-omni-2.0.
 
-    This replaces BailingMM2AudioProcessor for vLLM-omni usage, avoiding
-    the need for the full Ming audio processing pipeline (WavFrontend,
-    CMVN files, etc.).  The Thinker stage's WhisperAudioEncoder expects
-    whisper-style mel spectrograms, so this is the appropriate frontend.
+    Produces audio_feats in the time-first packed format.
+
+    Adapted from Ming's WhisperAudioEncoder
+    https://github.com/inclusionAI/Ming/blob/070dc3c13f95d97952ab7d22030df0c9e28a5122/modeling_whisper_encoder.py
+    and HF transformers WhisperFeatureExtractor
+    https://github.com/huggingface/transformers/blob/f842abaca95a7dbf3fc6e16122e7409109bc1431/src/transformers/models/whisper/feature_extraction_whisper.py#L33
     """
 
     model_input_names = ["audio_feats", "audio_feats_lengths"]
 
-    def __init__(self, sampling_rate: int = 16000, n_mels: int = 128):
+    def __init__(self, feature_size: int = 128, sampling_rate: int = 16000, **kwargs):
+        # feature_size == n_mels; stored so to_dict() serialises it correctly.
+        self.feature_size = feature_size
         self.sampling_rate = sampling_rate
-        self.n_mels = n_mels
+        super().__init__(**kwargs)
+
+    @property
+    def n_mels(self) -> int:
+        return self.feature_size
 
     def __call__(
         self,
-        audios: tuple[np.ndarray | torch.Tensor, int] | list[tuple[np.ndarray | torch.Tensor, int]],
+        audios: tuple | list,
         return_tensors: str | None = None,
         **kwargs,
     ) -> BatchFeature:
-        """Preprocess audio(s) into whisper mel spectrograms.
-
-        Args:
-            audios: Single (waveform, sample_rate) or list thereof.
-            return_tensors: Tensor format ("pt" for PyTorch).
-
-        Returns:
-            BatchFeature with audio_feats, audio_feats_lengths,
-            encoder_feats_lengths.
-        """
+        """Preprocess audio(s) into Whisper log-mel spectrograms"""
         import whisper
 
         if not isinstance(audios, list):
@@ -155,70 +119,41 @@ class MingWhisperAudioProcessor:
             if isinstance(waveform, np.ndarray):
                 waveform = torch.from_numpy(waveform)
             waveform = _normalize_audio_tensor(waveform, sr, target_sample_rate=self.sampling_rate)
-            # Whisper frontend: log-mel spectrogram
             mel = whisper.log_mel_spectrogram(waveform, n_mels=self.n_mels)
-            # mel shape: [n_mels, T] → we want [T, n_mels]
-            audio_feat_list.append(mel.transpose(0, 1))
+            audio_feat_list.append(mel.transpose(0, 1))  # [T, n_mels]
 
         audio_feats_lengths = torch.tensor([[feat.shape[0] for feat in audio_feat_list]], dtype=torch.long)
-        # Whisper encoder has two Conv1d layers (stride=2 each)
+        # Two stride-2 convolutions in series:
+        #   1. WhisperAudioEncoder conv2: kernel=3, stride=2, padding=1
+        #      (conv1 has stride=1 and does not change T)
+        #   2. AudioProjector Conv1d: kernel=3, stride=2, padding=1
+        # Combined: T → ((T-1)//2 + 1 - 1)//2 + 1
         encoder_feats_lengths = ((audio_feats_lengths - 3 + 2 * 1) // 2 + 1 - 3 + 2 * 1) // 2 + 1
-
-        # Concatenate along time dimension (batch=1 for vLLM)
-        audio_feats = torch.cat(audio_feat_list, dim=0).unsqueeze(0)
+        audio_feats = torch.cat(audio_feat_list, dim=0).unsqueeze(0)  # [1, T_total, n_mels]
 
         data = {
+            # [1, T_total, n_mels], all audio clips concatenated
             "audio_feats": audio_feats.numpy(),
+            # [1, n_audios], actual frame count
             "audio_feats_lengths": audio_feats_lengths.numpy(),
+            # [1, n_audios]
             "encoder_feats_lengths": encoder_feats_lengths,
         }
         return BatchFeature(data=data, tensor_type=return_tensors)
 
 
-# ---------------------------------------------------------------------------
-# Factory functions for building sub-processors from bundled config.
-# ---------------------------------------------------------------------------
-
-
-def build_image_processor(**overrides: Any):
-    """Build an image processor for Ming using Qwen2VLImageProcessor.
-
-    Ming's BailingMM2ImageProcessor is a near-identical copy of
-    Qwen2VLImageProcessor (same resize/normalize logic, same output
-    format: pixel_values + image_grid_thw).  The only difference is
-    default ``patch_size=16`` instead of ``14``.
-    """
-    from transformers import Qwen2VLImageProcessor
-
-    kwargs = {**MING_IMAGE_PROCESSOR_KWARGS, **overrides}
-    print(f" >>> Building image processor... with kwargs: {kwargs}")
-    return Qwen2VLImageProcessor(**kwargs)
-
-
-def build_audio_processor(**overrides: Any) -> MingWhisperAudioProcessor:
-    """Build the whisper-based audio processor for Ming."""
-    kwargs = {**MING_AUDIO_PROCESSOR_KWARGS, **overrides}
-    return MingWhisperAudioProcessor(**kwargs)
-
-
 class MingFlashOmniProcessor(ProcessorMixin):
-    """
-    Simplified processor for Ming-flash-omni Thinker stage.
+    """Top-level multimodal processor for Ming-flash-omni 2.0.
 
-    This processor combines image, audio, and text processing for the Ming model.
-    It's adapted from the original BailingMM2Processor to work with vLLM's
-    multimodal infrastructure.
+    Adapted from Ming's BailingMM2Processor
+    https://github.com/inclusionAI/Ming/blob/3954fcb880ff5e61ff128bcf7f1ec344d46a6fe3/processing_bailingmm2.py
 
-    Args:
-        image_processor: Image processor for handling images and videos
-        audio_processor: Audio processor for handling audio inputs
-        tokenizer: Tokenizer for text processing
-        spatial_merge_size: Spatial merge size from vision config (default: 2)
+    Subprocessors include:
+    - Qwen2VLImageProcessor (image/video)
+    - MingWhisperFeatureExtractor (modified audio processor using Whisper's log-mel spectrogram)
     """
 
     attributes = ["image_processor", "audio_processor", "tokenizer"]
-
-    # These are used by the ProcessorMixin base class
     image_processor_class = "AutoImageProcessor"
     audio_processor_class = "AutoFeatureExtractor"
     tokenizer_class = "AutoTokenizer"
@@ -228,32 +163,21 @@ class MingFlashOmniProcessor(ProcessorMixin):
         image_processor=None,
         audio_processor=None,
         tokenizer=None,
-        spatial_merge_size: int | None = None,
-        merge_size: int | None = None,
+        merge_size: int = 2,
         **kwargs,
     ):
-        # High-level placeholder tokens used in user prompts.
-        # These are *not* the same as the low-level delimiters
-        # (<image>, <video>, <audio>) in preprocessor_config.json.
+        self.spatial_merge_size = merge_size
         self.image_token = PLACEHOLDER_IMAGE_TOKEN_IN_TEXT
         self.video_token = PLACEHOLDER_VIDEO_TOKEN_IN_TEXT
         self.audio_token = PLACEHOLDER_AUDIO_TOKEN_IN_TEXT
+        super().__init__(
+            image_processor=image_processor,
+            audio_processor=audio_processor,
+            tokenizer=tokenizer,
+        )
 
-        # spatial_merge_size can arrive as our explicit kwarg or as
-        # ``merge_size`` from preprocessor_config.json.
-        self.spatial_merge_size = spatial_merge_size or merge_size or 2
-
-        # Set sub-processor attributes directly.  We intentionally skip
-        # ProcessorMixin.__init__'s type-checking because our sub-processors
-        # may be custom classes (Qwen2VLImageProcessor, MingWhisperAudioProcessor)
-        # that don't match the expected Auto* class hierarchy, and some
-        # sub-processors may legitimately be None when the model is used for
-        # text-only inference.
-        self.image_processor = image_processor
-        self.audio_processor = audio_processor
-        self.tokenizer = tokenizer
-
-        if tokenizer is not None:
+        # fall back to the tokenizer's own chat_template.
+        if self.chat_template is None and tokenizer is not None:
             self.chat_template = getattr(tokenizer, "chat_template", None)
 
     def __call__(
@@ -264,28 +188,14 @@ class MingFlashOmniProcessor(ProcessorMixin):
         audios: tuple[np.ndarray, int] | list[tuple[np.ndarray, int]] | None = None,
         **kwargs,
     ) -> BatchFeature:
-        """
-        Process multimodal inputs for Ming-flash-omni.
-
-        Args:
-            text: Text input(s) with placeholder tokens
-            images: Image input(s)
-            videos: Video input(s)
-            audios: Audio input(s) as (waveform, sample_rate) tuples
-            **kwargs: Additional arguments passed to sub-processors
-
-        Returns:
-            BatchFeature with processed inputs
-        """
         # Ensure text is a list
         if isinstance(text, str):
             text = [text]
         elif not isinstance(text, list):
-            raise ValueError("Text must be a string or list of strings")
+            raise ValueError("text must be a string or list of strings")
 
-        data = {}
+        data: dict[str, Any] = {}
 
-        # Process images
         if images is not None and self.image_processor is not None:
             image_outputs = self.image_processor(
                 images=images,
@@ -294,12 +204,9 @@ class MingFlashOmniProcessor(ProcessorMixin):
                 **kwargs.get("images_kwargs", {}),
             )
             data.update(image_outputs)
-
-            # Expand image tokens in text based on actual patch counts
             if "image_grid_thw" in image_outputs:
                 text = self._expand_image_tokens(text, image_outputs["image_grid_thw"])
 
-        # Process videos
         if videos is not None and self.image_processor is not None:
             video_outputs = self.image_processor(
                 images=None,
@@ -307,18 +214,14 @@ class MingFlashOmniProcessor(ProcessorMixin):
                 return_tensors="pt",
                 **kwargs.get("videos_kwargs", {}),
             )
-            # Rename keys for videos
             if "pixel_values" in video_outputs:
                 video_outputs["pixel_values_videos"] = video_outputs.pop("pixel_values")
             if "image_grid_thw" in video_outputs:
                 video_outputs["video_grid_thw"] = video_outputs.pop("image_grid_thw")
             data.update(video_outputs)
-
-            # Expand video tokens in text
             if "video_grid_thw" in video_outputs:
                 text = self._expand_video_tokens(text, video_outputs["video_grid_thw"])
 
-        # Process audio
         if audios is not None and self.audio_processor is not None:
             audio_outputs = self.audio_processor(
                 audios,
@@ -326,19 +229,15 @@ class MingFlashOmniProcessor(ProcessorMixin):
                 **kwargs.get("audio_kwargs", {}),
             )
             data.update(audio_outputs)
-
-            # Expand audio tokens in text
             if "audio_feats_lengths" in audio_outputs:
                 text = self._expand_audio_tokens(text, audio_outputs["audio_feats_lengths"])
 
-        # Tokenize the (now expanded) text
         text_outputs = self.tokenizer(
             text,
             return_tensors="pt",
             **kwargs.get("text_kwargs", {}),
         )
         data.update(text_outputs)
-
         return BatchFeature(data=data)
 
     def _expand_image_tokens(
@@ -347,34 +246,21 @@ class MingFlashOmniProcessor(ProcessorMixin):
         image_grid_thw: torch.Tensor,
         special_token: str = PLACEHOLDER_IMAGE_TOKEN_IN_TEXT,
     ) -> list[str]:
-        """
-        Expand high-level <IMAGE> tokens to actual patch tokens.
-
-        Replaces: <IMAGE> → <image><imagePatch>*N</image>
-        where N is calculated from image_grid_thw.
-        """
-        prompt_strings = []
-        image_index = 0
-
-        # Calculate number of patches per image
-        # grid_thw format: [num_images, 3] with (t, h, w)
-        # After spatial merge: patches = (t * h * w) / (spatial_merge_size^2)
         merge_size = self.spatial_merge_size
         num_patches_per_image = torch.prod(image_grid_thw, dim=1) // (merge_size**2)
-
+        prompt_strings = []
+        image_index = 0
         for sample in text:
             num_images = sample.count(special_token)
             if num_images > 0:
                 for i in range(image_index, num_images + image_index):
                     num_patches = int(num_patches_per_image[i].item())
-                    # Format: <image><imagePatch>*N</image>
                     img_text = (
                         DEFAULT_IM_START_TOKEN + (DEFAULT_IMAGE_PATCH_TOKEN * num_patches) + DEFAULT_IM_END_TOKEN + "\n"
                     )
                     sample = sample.replace(special_token, img_text, 1)
             image_index += num_images
             prompt_strings.append(sample)
-
         return prompt_strings
 
     def _expand_video_tokens(
@@ -383,25 +269,16 @@ class MingFlashOmniProcessor(ProcessorMixin):
         video_grid_thw: torch.Tensor,
         special_token: str = PLACEHOLDER_VIDEO_TOKEN_IN_TEXT,
     ) -> list[str]:
-        """
-        Expand high-level <VIDEO> tokens to actual frame patch tokens.
-
-        Replaces: <VIDEO> → <video><framePatch>*N</video>
-        where N is calculated from video_grid_thw.
-        """
-        prompt_strings = []
-        video_index = 0
-
-        # Calculate number of patches per video
+        """Expand high-level video tokens to actual frame patch tokens."""
         merge_size = self.spatial_merge_size
         num_patches_per_video = torch.prod(video_grid_thw, dim=1) // (merge_size**2)
-
+        prompt_strings = []
+        video_index = 0
         for sample in text:
             num_videos = sample.count(special_token)
             if num_videos > 0:
                 for i in range(video_index, num_videos + video_index):
                     num_patches = int(num_patches_per_video[i].item())
-                    # Format: <video><framePatch>*N</video>
                     video_text = (
                         DEFAULT_VID_START_TOKEN
                         + (DEFAULT_FRAME_PATCH_TOKEN * num_patches)
@@ -411,7 +288,6 @@ class MingFlashOmniProcessor(ProcessorMixin):
                     sample = sample.replace(special_token, video_text, 1)
             video_index += num_videos
             prompt_strings.append(sample)
-
         return prompt_strings
 
     def _expand_audio_tokens(
@@ -420,26 +296,17 @@ class MingFlashOmniProcessor(ProcessorMixin):
         audio_feats_lengths: torch.Tensor,
         special_token: str = PLACEHOLDER_AUDIO_TOKEN_IN_TEXT,
     ) -> list[str]:
-        """
-        Expand high-level <AUDIO> tokens to actual audio patch tokens.
-
-        Replaces: <AUDIO> → <audio><audioPatch>*N</audio>
-        where N is the audio feature length.
-        """
+        """Expand high-level audio tokens to actual audio patch tokens"""
         prompt_strings = []
-
         for sample, audio_feats_length_tensor in zip(text, audio_feats_lengths):
             for audio_feats_length in audio_feats_length_tensor:
                 num_patches = int(audio_feats_length.item())
-                # Format: <audio><audioPatch>*N</audio>
                 audio_text = DEFAULT_AU_START_TOKEN + (DEFAULT_AUDIO_PATCH_TOKEN * num_patches) + DEFAULT_AU_END_TOKEN
                 if special_token in sample:
                     sample = sample.replace(special_token, audio_text, 1)
                 else:
-                    # If no placeholder, append audio at the end
                     sample = sample + audio_text + "\n"
             prompt_strings.append(sample)
-
         return prompt_strings
 
     def apply_system_template(
@@ -447,25 +314,9 @@ class MingFlashOmniProcessor(ProcessorMixin):
         sys_prompt_exp: str | None = None,
         use_cot_system_prompt: bool = False,
     ) -> str:
-        """
-        Apply Ming's system prompt template.
-
-        Args:
-            sys_prompt_exp: Optional custom system prompt to replace default
-            use_cot_system_prompt: Whether to enable detailed thinking mode
-
-        Returns:
-            Formatted system prompt string
-        """
-        if use_cot_system_prompt:
-            sys_prompt = SYSTEM_PROMPT_THINK
-        else:
-            sys_prompt = SYSTEM_PROMPT_NOTHINK
-
+        sys_prompt = SYSTEM_PROMPT_THINK if use_cot_system_prompt else SYSTEM_PROMPT_NOTHINK
         if sys_prompt_exp is not None:
-            # Replace the default friendly assistant message with custom prompt
             sys_prompt = sys_prompt.replace("你是一个友好的AI助手。", sys_prompt_exp)
-
         return sys_prompt
 
     def apply_chat_template(
@@ -475,84 +326,25 @@ class MingFlashOmniProcessor(ProcessorMixin):
         use_cot_system_prompt: bool = False,
         **kwargs,
     ) -> str:
-        """
-        Apply Ming's chat template to format multi-turn conversations.
+        """Apply Ming's system prompt template"""
+        eos = self.tokenizer.eos_token if self.tokenizer is not None else "</s>"
+        text = self.apply_system_template(sys_prompt_exp, use_cot_system_prompt) + eos
 
-        This formats conversations using Ming's role-based format:
-        <role>SYSTEM</role>...<eos>
-        <role>HUMAN</role>...<eos>
-        <role>ASSISTANT</role>...<eos>
-        <role>HUMAN</role>...<eos>
-        <role>ASSISTANT</role>
-
-        Args:
-            conversation: List of message dicts with 'role' and 'content' keys
-                Each message should have:
-                - role: "HUMAN" or "ASSISTANT"
-                - content: Either a string or list of content dicts
-                    Content dict format: {"type": "text/image/video/audio", ...}
-            sys_prompt_exp: Optional custom system prompt
-            use_cot_system_prompt: Whether to enable detailed thinking mode
-            **kwargs: Additional arguments (unused)
-
-        Returns:
-            Formatted conversation string ready for tokenization
-
-        Example:
-            >>> conversation = [
-            ...     {
-            ...         "role": "HUMAN",
-            ...         "content": [
-            ...             {"type": "image", "image": image_obj},
-            ...             {"type": "text", "text": "What's in this image?"}
-            ...         ]
-            ...     },
-            ...     {
-            ...         "role": "ASSISTANT",
-            ...         "content": [{"type": "text", "text": "I see a cat."}]
-            ...     },
-            ...     {
-            ...         "role": "HUMAN",
-            ...         "content": [{"type": "text", "text": "What color is it?"}]
-            ...     }
-            ... ]
-            >>> text = processor.apply_chat_template(conversation)
-        """
-        text = ""
-
-        # Add system prompt
-        sys_prompt = self.apply_system_template(sys_prompt_exp, use_cot_system_prompt)
-        if self.tokenizer is not None:
-            text = sys_prompt + self.tokenizer.eos_token
-        else:
-            text = sys_prompt + "</s>"  # fallback
-
-        # Process each message in the conversation
         for idx, message in enumerate(conversation):
             assert message["role"] in ["HUMAN", "ASSISTANT"], (
                 f"Invalid role: {message['role']}. Must be 'HUMAN' or 'ASSISTANT'"
             )
-
-            # Last message must be from HUMAN (expecting assistant response)
             if idx == len(conversation) - 1:
-                assert message["role"] == "HUMAN", "Last message in conversation must be from HUMAN"
+                assert message["role"] == "HUMAN", "Last message must be from HUMAN"
 
-            # Add role prefix
-            if message["role"] == "HUMAN":
-                text += USER_PREFIX
-            elif message["role"] == "ASSISTANT":
-                text += ASSISTANT_PREFIX
+            text += USER_PREFIX if message["role"] == "HUMAN" else ASSISTANT_PREFIX
 
-            # Handle message content
             content = message["content"]
-
-            # Support both string content and structured content list
             if isinstance(content, str):
-                # Simple text-only message
+                # text-only
                 text += content
             elif isinstance(content, list):
-                # Structured content with multimodal elements
-                # Count existing placeholders in the content
+                # structured content with multimodal elements
                 content_str = str(content)
                 image_counts = content_str.count("<image>")
                 video_counts = content_str.count("<video>")
@@ -565,67 +357,51 @@ class MingFlashOmniProcessor(ProcessorMixin):
                         # Add image placeholder if not already in content
                         image_data = content_item.get("image")
                         if image_data is not None:
-                            # Determine number of images
                             from PIL import Image as PILImage
 
                             num_images = 1 if isinstance(image_data, (str, PILImage.Image)) else len(image_data)
-
                             if image_counts < num_images:
-                                # Add missing placeholders
-                                image_placeholder = (PLACEHOLDER_IMAGE_TOKEN_IN_TEXT + "\n") * (
-                                    num_images - image_counts
-                                )
-                                text += image_placeholder.rstrip("\n")
+                                placeholder = (PLACEHOLDER_IMAGE_TOKEN_IN_TEXT + "\n") * (num_images - image_counts)
+                                text += placeholder.rstrip("\n")
                                 image_counts = num_images
 
                     elif content_type == "video":
-                        # Video placeholder
                         assert video_counts <= 1, "Video count must be at most 1 per message!"
                         if video_counts == 0:
                             text += PLACEHOLDER_VIDEO_TOKEN_IN_TEXT
                             video_counts = 1
 
                     elif content_type == "audio":
-                        # Add audio placeholder if not already in content
                         audio_data = content_item.get("audio")
                         if audio_data is not None:
                             num_audios = 1 if isinstance(audio_data, str) else len(audio_data)
-
                             if audio_counts < num_audios:
-                                audio_placeholder = (PLACEHOLDER_AUDIO_TOKEN_IN_TEXT + "\n") * (
-                                    num_audios - audio_counts
-                                )
-                                text += audio_placeholder.rstrip("\n")
+                                placeholder = (PLACEHOLDER_AUDIO_TOKEN_IN_TEXT + "\n") * (num_audios - audio_counts)
+                                text += placeholder.rstrip("\n")
                                 audio_counts = num_audios
 
                     elif content_type == "text":
-                        # Add text content
                         text += content_item.get("text", "")
 
             # Add EOS token after each message except the last one
-            if self.tokenizer is not None:
-                text += self.tokenizer.eos_token
-            else:
-                text += "</s>"
+            text += eos
 
-        # Add assistant prefix for the expected response
         text += ASSISTANT_PREFIX
-
         return text
 
     def batch_decode(self, *args, **kwargs):
-        """Forward to tokenizer's batch_decode."""
         return self.tokenizer.batch_decode(*args, **kwargs)
 
     def decode(self, *args, **kwargs):
-        """Forward to tokenizer's decode."""
         return self.tokenizer.decode(*args, **kwargs)
 
     @property
     def model_input_names(self):
-        """Get model input names from all sub-processors."""
         tokenizer_input_names = self.tokenizer.model_input_names if self.tokenizer else []
         image_processor_input_names = self.image_processor.model_input_names if self.image_processor else []
         audio_processor_input_names = self.audio_processor.model_input_names if self.audio_processor else []
-
         return list(dict.fromkeys(tokenizer_input_names + image_processor_input_names + audio_processor_input_names))
+
+
+AutoFeatureExtractor.register("MingWhisperFeatureExtractor", MingWhisperFeatureExtractor)
+AutoProcessor.register("MingFlashOmniProcessor", MingFlashOmniProcessor)

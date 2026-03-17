@@ -49,6 +49,7 @@ from vllm.sequence import IntermediateTensors
 from vllm_omni.model_executor.custom_process_mixin import CustomProcessMixin
 from vllm_omni.model_executor.models.output_templates import OmniOutput
 from vllm_omni.transformers_utils.configs.ming_flash_omni import BailingMM2Config, MingFlashOmniThinkerConfig
+from vllm_omni.transformers_utils.processors.ming import MingFlashOmniProcessor
 
 from .components import (
     AudioProjector,
@@ -77,49 +78,7 @@ class MingFlashOmniThinkerProcessingInfo(BaseProcessingInfo):
         return self.ctx.get_hf_config(BailingMM2Config)
 
     def get_hf_processor(self, **kwargs: object):
-        """Get the processor for Ming-flash-omni.
-
-        The HF model repo (inclusionAI/Ming-flash-omni-2.0) does not ship
-        ``preprocessor_config.json`` or the processor ``.py`` files, so the
-        standard ``AutoProcessor.from_pretrained`` path does not work.
-
-        Instead we construct sub-processors directly via
-        ``ctx.init_processor`` (custom processor pattern):
-          - **Image**: ``Qwen2VLImageProcessor`` from transformers
-            (Ming's ``BailingMM2ImageProcessor`` is a near-identical copy
-            of it, with ``patch_size=16`` instead of 14).
-          - **Audio**: ``MingWhisperAudioProcessor`` bundled in
-            ``processing_ming_flash_omni.py`` (whisper mel spectrogram
-            frontend matching the Thinker's WhisperAudioEncoder).
-
-        Config values (``patch_size``, ``merge_size``, ``min_pixels``,
-        ``max_pixels``, ``n_mels``, etc.) are bundled as constants in
-        ``processing_ming_flash_omni.py``.
-        """
-        from .processing_ming_flash_omni import (
-            MingFlashOmniProcessor,
-            build_audio_processor,
-            build_image_processor,
-        )
-
-        tokenizer = self.ctx.get_tokenizer()
-
-        # Read spatial_merge_size from vision config for correct patch counting
-        hf_config = self.get_hf_config()
-        spatial_merge_size = 2
-        if hf_config.vision_config is not None:
-            spatial_merge_size = getattr(hf_config.vision_config, "spatial_merge_size", 2)
-
-        image_processor = build_image_processor(merge_size=spatial_merge_size)
-        audio_processor = build_audio_processor()
-
-        return self.ctx.init_processor(
-            MingFlashOmniProcessor,
-            image_processor=image_processor,
-            audio_processor=audio_processor,
-            tokenizer=tokenizer,
-            spatial_merge_size=spatial_merge_size,
-        )
+        return self.ctx.get_hf_processor(MingFlashOmniProcessor, **kwargs)
 
     def get_supported_mm_limits(self) -> Mapping[str, int | None]:
         """Get supported multimodal limits.
@@ -251,7 +210,7 @@ class MingFlashOmniThinkerMultiModalProcessor(BaseMultiModalProcessor[MingFlashO
         Returns:
             List of PromptUpdate objects defining token replacements.
         """
-        from .processing_ming_flash_omni import (
+        from vllm_omni.transformers_utils.processors.ming import (
             PLACEHOLDER_AUDIO_TOKEN_IN_TEXT,
             PLACEHOLDER_IMAGE_TOKEN_IN_TEXT,
             PLACEHOLDER_VIDEO_TOKEN_IN_TEXT,
@@ -686,20 +645,37 @@ class MingFlashOmniThinkerForConditionalGeneration(
         """Extract and project audio features.
 
         Args:
-            audio_feats: [B, n_mels, T] mel spectrogram features.
-            audio_feats_lengths: [B] original audio lengths in frames.
+            audio_feats: [B, L_total, n_mels] wrapped mel features — multiple audio
+                clips per batch item are concatenated along the time dimension
+                (time-first, as produced by MingWhisperFeatureExtractor).
+            audio_feats_lengths: [B, N] lengths of each audio clip per batch item.
+                N is the max number of clips per item; zero-padded entries are skipped.
 
         Returns:
             Tuple of:
-                - audio_embeds: [B, T', hidden_size] projected audio embeddings
-                - audio_embeds_lengths: [B] lengths after projection
+                - audio_embeds: [total_clips, T'_max, hidden_size] projected audio
+                  embeddings, padded to the longest projected clip length.
+                - audio_embeds_lengths: [total_clips] lengths after projection.
         """
         if self.audio is None:
             raise ValueError("Audio encoder not initialized")
 
-        # Convert to list format expected by WhisperAudioEncoder
-        x_list = [audio_feats[i, :, : audio_feats_lengths[i]] for i in range(audio_feats.size(0))]
-        audio_lens = audio_feats_lengths.tolist()
+        # Unwrap packed [B, L_total, n_mels] into a list of [n_mels, T_i] tensors,
+        # one per audio clip, as expected by WhisperAudioEncoder.
+        x_list: list[torch.Tensor] = []
+        audio_lens: list[int] = []
+        for i in range(audio_feats_lengths.shape[0]):
+            feat_index = 0
+            for j in range(audio_feats_lengths.shape[1]):
+                feat_len = int(audio_feats_lengths[i, j].item())
+                if feat_len == 0:
+                    break
+                # audio_feats[i] is [L_total, n_mels]; slice one clip and
+                # transpose to [n_mels, T] for Conv1d.
+                mel_seg = audio_feats[i, feat_index : feat_index + feat_len].transpose(0, 1)
+                x_list.append(mel_seg)
+                audio_lens.append(feat_len)
+                feat_index += feat_len
 
         # Encode audio (returns packed format [total_T', n_state])
         audio_embeds_packed = self.audio(x_list, audio_lens)
@@ -712,7 +688,8 @@ class MingFlashOmniThinkerForConditionalGeneration(
         offset = 0
         audio_embeds_lengths = []
         for audio_len in audio_lens:
-            # Calculate encoded length after Whisper's Conv1d (stride=2)
+            # WhisperAudioEncoder: conv1 (stride=1, no length change) +
+            # conv2 (kernel=3, stride=2, padding=1) → (T-1)//2 + 1
             encoded_len = (audio_len - 3 + 2 * 1) // 2 + 1
             audio_segment = audio_embeds_packed[offset : offset + encoded_len]
             offset += encoded_len

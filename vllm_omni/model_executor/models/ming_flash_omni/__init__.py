@@ -8,7 +8,6 @@ from .ming_flash_omni_thinker import (
     MingFlashOmniThinkerMultiModalProcessor,
     MingFlashOmniThinkerProcessingInfo,
 )
-from .processing_ming_flash_omni import MingFlashOmniProcessor
 
 __all__ = [
     "MingFlashOmniForConditionalGeneration",
