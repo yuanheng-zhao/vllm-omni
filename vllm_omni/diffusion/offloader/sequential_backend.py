@@ -36,7 +36,7 @@ class SequentialOffloadHook(ModelHook):
         self.pin_memory = pin_memory
 
     @staticmethod
-    def _move_params(module: nn.Module, device: torch.device) -> None:
+    def _move_params(module: nn.Module, device: torch.device, non_blocking: bool = False) -> None:
         """Move module parameters and buffers to device.
 
         This cls method specifically prevents recursion device movement,
@@ -47,10 +47,10 @@ class SequentialOffloadHook(ModelHook):
         """
         for p in module.parameters():
             if p.data.device != device:
-                p.data = p.data.to(device, non_blocking=True)
+                p.data = p.data.to(device, non_blocking=non_blocking)
         for b in module.buffers():
             if b.device != device:
-                b.data = b.data.to(device, non_blocking=True)
+                b.data = b.data.to(device, non_blocking=non_blocking)
 
     def _to_cpu(self, module: nn.Module) -> None:
         """Move module to CPU."""
@@ -63,7 +63,7 @@ class SequentialOffloadHook(ModelHook):
         if param.device.type == "cpu":
             return
 
-        self._move_params(module, torch.device("cpu"))
+        self._move_params(module, torch.device("cpu"), non_blocking=False)
         current_omni_platform.empty_cache()
 
         if self.pin_memory:
@@ -80,7 +80,7 @@ class SequentialOffloadHook(ModelHook):
         except StopIteration:
             return
 
-        self._move_params(module, self.device)
+        self._move_params(module, self.device, non_blocking=False)
 
     def pre_forward(self, module: nn.Module, *args, **kwargs) -> tuple[tuple, dict]:
         # Offload target modules to CPU
