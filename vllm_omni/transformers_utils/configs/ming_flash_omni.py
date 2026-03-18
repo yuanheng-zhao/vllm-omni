@@ -74,6 +74,7 @@ class BailingMoeV2Config(PretrainedConfig):
         video_patch_token=157175,
         image_start_token=157158,
         video_start_token=157159,
+        audio_patch_token=None,  # resolved from tokenizer at model init
         # Position encoding parameters
         spatial_merge_size=2,
         tokens_per_second=2,
@@ -124,6 +125,7 @@ class BailingMoeV2Config(PretrainedConfig):
         self.video_patch_token = video_patch_token
         self.image_start_token = image_start_token
         self.video_start_token = video_start_token
+        self.audio_patch_token = audio_patch_token
         self.spatial_merge_size = spatial_merge_size
         self.tokens_per_second = tokens_per_second
 

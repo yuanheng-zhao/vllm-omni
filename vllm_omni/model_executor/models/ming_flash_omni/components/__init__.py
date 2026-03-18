@@ -12,6 +12,7 @@ from .modeling_bailing_moe_v2 import (
 from .modeling_utils import (
     Transpose,
     build_modality_mask,
+    compute_placeholder_loc_lens,
     encode_audio_segments,
     patch_continuous_features,
     unwrap_feats,
@@ -31,6 +32,7 @@ __all__ = [
     "AudioProjector",
     # Utilities
     "Transpose",
+    "compute_placeholder_loc_lens",
     "patch_continuous_features",
     "build_modality_mask",
     "encode_audio_segments",

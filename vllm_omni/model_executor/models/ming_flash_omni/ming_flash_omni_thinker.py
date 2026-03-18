@@ -615,12 +615,9 @@ class MingFlashOmniThinkerForConditionalGeneration(
         self.linear_proj_audio = None
         if thinker_config and thinker_config.audio_config:
             audio_cfg = thinker_config.audio_config
+            whisper_cfg = getattr(audio_cfg, "whisper_encoder_config", {}) or {}
             self.audio = WhisperAudioEncoder(
-                n_mels=getattr(audio_cfg, "n_mels", 128),
-                n_ctx=getattr(audio_cfg, "n_ctx", 15000),
-                n_state=getattr(audio_cfg, "n_state", 1280),
-                n_head=getattr(audio_cfg, "n_head", 20),
-                n_layer=getattr(audio_cfg, "n_layer", 32),
+                **whisper_cfg,
                 use_flash_attn=True,
             )
             self.linear_proj_audio = AudioProjector(
@@ -631,6 +628,25 @@ class MingFlashOmniThinkerForConditionalGeneration(
                 mlp_depth=getattr(thinker_config, "mlp_depth", 1),
             )
             logger.info("Initialized WhisperAudioEncoder and AudioProjector")
+
+        # Resolve audio_patch_token from the tokenizer if not already set in the config.
+        # This is required by prompt_wrap_audio() to compute placeholder_audio_loc_lens
+        # on-the-fly when upstream vLLM expands placeholders
+        if self.audio is not None and getattr(llm_config, "audio_patch_token", None) is None:
+            from vllm.transformers_utils.tokenizer import get_tokenizer
+
+            tokenizer = get_tokenizer(
+                vllm_config.model_config.tokenizer, trust_remote_code=vllm_config.model_config.trust_remote_code
+            )
+            audio_patch_id = tokenizer.convert_tokens_to_ids("<audioPatch>")
+            if isinstance(audio_patch_id, int) and audio_patch_id != tokenizer.unk_token_id:
+                llm_config.audio_patch_token = audio_patch_id
+                logger.info("Resolved <audioPatch> token ID = %d from tokenizer", audio_patch_id)
+            else:
+                logger.warning(
+                    "<audioPatch> not found in tokenizer vocabulary. "
+                    "Set audio_patch_token in config manually if audio is used."
+                )
 
         logger.info(
             f"MingFlashOmniThinker initialized with: "

@@ -62,7 +62,7 @@ from vllm.v1.sample.sampler import Sampler
 from vllm_omni.model_executor.custom_process_mixin import CustomProcessMixin
 from vllm_omni.transformers_utils.configs.ming_flash_omni import BailingMoeV2Config
 
-from .modeling_utils import build_modality_mask, patch_continuous_features
+from .modeling_utils import build_modality_mask, compute_placeholder_loc_lens, patch_continuous_features
 
 logger = init_logger(__name__)
 
@@ -1132,7 +1132,25 @@ class BailingMoeV2Model(nn.Module):
     def prompt_wrap_audio(
         self, input_ids, inputs_embeds, audio_embeds, audio_embeds_lengths, placeholder_audio_loc_lens
     ):
-        """Merge audio embeddings into input embeddings."""
+        """Merge audio embeddings into input embeddings.
+
+        If ``placeholder_audio_loc_lens`` is *None* (the normal case when
+        running under vLLM, which expands placeholder tokens via
+        ``PromptReplacement`` rather than the HF processor), it is computed
+        on-the-fly by scanning ``input_ids`` for contiguous runs of the
+        ``<audioPatch>`` token.
+        """
+        if placeholder_audio_loc_lens is None:
+            audio_patch_token_id = getattr(self.config, "audio_patch_token", None)
+            if audio_patch_token_id is None:
+                raise ValueError(
+                    "placeholder_audio_loc_lens is None and config.audio_patch_token "
+                    "is not set. Set audio_patch_token in BailingMM2Config (the "
+                    "token ID of <audioPatch>) so that placeholder locations can "
+                    "be inferred from input_ids."
+                )
+            placeholder_audio_loc_lens = compute_placeholder_loc_lens(input_ids, audio_patch_token_id)
+
         inputs_embeds = patch_continuous_features(
             input_embeddings=inputs_embeds,
             placeholder_loc_lens=placeholder_audio_loc_lens,
