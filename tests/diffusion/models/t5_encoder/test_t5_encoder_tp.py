@@ -6,7 +6,6 @@ from transformers import T5Config
 from vllm.config import DeviceConfig, VllmConfig, set_current_vllm_config
 
 from vllm_omni.diffusion.models.t5_encoder.t5_encoder import (
-    T5DenseGatedActDense,
     T5EncoderModel,
     T5SelfAttention,
 )
@@ -66,59 +65,6 @@ def setup_tp_group(monkeypatch, mocker):
         yield
 
 
-class TestT5SelfAttentionWeightLoading:
-    """Verify QKV fusion weight loading under TP=2"""
-
-    def test_qkv_fusion_weight_shapes(self, t5_config):
-        attn = T5SelfAttention(t5_config, has_relative_attention_bias=True)
-
-        q_weight = torch.randn(t5_config.num_heads * t5_config.d_kv, t5_config.d_model)
-        k_weight = torch.randn(t5_config.num_heads * t5_config.d_kv, t5_config.d_model)
-        v_weight = torch.randn(t5_config.num_heads * t5_config.d_kv, t5_config.d_model)
-
-        loaded = attn.load_weights(
-            [
-                ("q.weight", q_weight),
-                ("k.weight", k_weight),
-                ("v.weight", v_weight),
-            ]
-        )
-
-        assert len(loaded) > 0, "Should load weights"
-
-        # TP=2: qkv_proj output = 3 * (n_heads/2) * d_kv = 96
-        expected_output_dim = 3 * (t5_config.num_heads // 2) * t5_config.d_kv
-        assert attn.qkv_proj.weight.shape == (expected_output_dim, t5_config.d_model), (
-            f"Expected ({expected_output_dim}, {t5_config.d_model}), got {attn.qkv_proj.weight.shape}"
-        )
-
-    def test_output_projection_shape(self, t5_config):
-        attn = T5SelfAttention(t5_config, has_relative_attention_bias=False)
-
-        o_weight = torch.randn(t5_config.d_model, t5_config.num_heads * t5_config.d_kv)
-        loaded = attn.load_weights([("o.weight", o_weight)])
-
-        assert "o.weight" in loaded
-        expected_input_dim = (t5_config.num_heads * t5_config.d_kv) // 2
-        assert attn.o.weight.shape == (t5_config.d_model, expected_input_dim)
-
-    def test_relative_attention_bias_loaded(self, t5_config):
-        attn = T5SelfAttention(t5_config, has_relative_attention_bias=True)
-
-        bias_weight = torch.randn(t5_config.relative_attention_num_buckets, t5_config.num_heads)
-        loaded = attn.load_weights(
-            [
-                ("relative_attention_bias.weight", bias_weight),
-            ]
-        )
-
-        assert "relative_attention_bias.weight" in loaded
-        assert attn.relative_attention_bias.weight.shape == (
-            t5_config.relative_attention_num_buckets,
-            t5_config.num_heads,
-        )
-
-
 class TestRelativePositionBiasTPSlicing:
     """Verify compute_bias slices heads correctly per TP rank."""
 
@@ -147,41 +93,6 @@ class TestRelativePositionBiasTPSlicing:
 
         full_bias = torch.cat(biases, dim=1)
         assert full_bias.shape == (1, t5_config.num_heads, seq_len, seq_len)
-
-
-class TestT5DenseGatedActDenseWeightLoading:
-    """Verify wi_0/wi_1 fusion into MergedColumnParallelLinear under TP=2."""
-
-    def test_wi_fusion_weight_shapes(self, t5_config):
-        ffn = T5DenseGatedActDense(t5_config)
-
-        wi_0_weight = torch.randn(t5_config.d_ff, t5_config.d_model)
-        wi_1_weight = torch.randn(t5_config.d_ff, t5_config.d_model)
-
-        loaded = ffn.load_weights(
-            [
-                ("wi_0.weight", wi_0_weight),
-                ("wi_1.weight", wi_1_weight),
-            ]
-        )
-
-        assert len(loaded) > 0
-
-        # MergedColumnParallelLinear with TP=2: d_ff/2 * 2 shards = d_ff
-        expected_output_dim = t5_config.d_ff
-        assert ffn.wi.weight.shape == (expected_output_dim, t5_config.d_model), (
-            f"Expected ({expected_output_dim}, {t5_config.d_model}), got {ffn.wi.weight.shape}"
-        )
-
-    def test_wo_shape(self, t5_config):
-        ffn = T5DenseGatedActDense(t5_config)
-
-        wo_weight = torch.randn(t5_config.d_model, t5_config.d_ff)
-        loaded = ffn.load_weights([("wo.weight", wo_weight)])
-
-        assert "wo.weight" in loaded
-        expected_input_dim = t5_config.d_ff // 2
-        assert ffn.wo.weight.shape == (t5_config.d_model, expected_input_dim)
 
 
 class TestT5EncoderModelWeightLoading:
@@ -221,17 +132,18 @@ class TestT5EncoderModelWeightLoading:
         model = T5EncoderModel(config, prefix="text_encoder")
 
         inner_dim = config.num_heads * config.d_kv
+        prefix = "encoder.block.0.layer.0.SelfAttention."
 
-        attn = model.encoder.block[0].layer[0].SelfAttention
-        loaded = attn.load_weights(
+        loaded = model.load_weights(
             [
-                ("q.weight", torch.randn(inner_dim, config.d_model)),
-                ("k.weight", torch.randn(inner_dim, config.d_model)),
-                ("v.weight", torch.randn(inner_dim, config.d_model)),
+                (prefix + "q.weight", torch.randn(inner_dim, config.d_model)),
+                (prefix + "k.weight", torch.randn(inner_dim, config.d_model)),
+                (prefix + "v.weight", torch.randn(inner_dim, config.d_model)),
             ]
         )
 
         assert len(loaded) > 0
+        attn = model.encoder.block[0].layer[0].SelfAttention
         expected_qkv_dim = 3 * (config.num_heads // 2) * config.d_kv
         assert attn.qkv_proj.weight.shape == (expected_qkv_dim, config.d_model)
 
