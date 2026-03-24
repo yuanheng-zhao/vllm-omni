@@ -62,8 +62,6 @@ from vllm.v1.sample.sampler import Sampler
 from vllm_omni.model_executor.custom_process_mixin import CustomProcessMixin
 from vllm_omni.transformers_utils.configs.ming_flash_omni import BailingMoeV2Config
 
-from .modeling_utils import build_modality_mask, compute_placeholder_loc_lens, patch_continuous_features
-
 logger = init_logger(__name__)
 
 
@@ -735,8 +733,8 @@ class BailingMoeV2SparseMoeBlock(nn.Module):
                 else:
                     raise ValueError(f"Unsupported audio_mask shape: {audio_mask.shape}")
 
-            if image_mask is not None and audio_mask is not None:
-                assert torch.logical_and(image_mask, audio_mask).sum() == 0
+            # if image_mask is not None and audio_mask is not None:
+            #     assert torch.logical_and(image_mask, audio_mask).sum() == 0
 
             image_topk_idx, image_topk_weight, image_router_logits = self.image_gate(hidden_states)
             audio_topk_idx, audio_topk_weight, audio_router_logits = self.audio_gate(hidden_states)
@@ -1107,116 +1105,15 @@ class BailingMoeV2Model(nn.Module):
     # def set_input_embeddings(self, value):
     #     self.word_embeddings = value
 
-    def prompt_wrap_vision(self, input_ids, inputs_embeds, vision_embeds, vision_token_id):
-        """Merge vision embeddings into input embeddings."""
-        if vision_embeds is None or input_ids is None:
-            return inputs_embeds
-
-        if len(vision_embeds.shape) == 3:
-            vision_embeds = vision_embeds.reshape(-1, vision_embeds.shape[-1])
-
-        n_image_tokens = (input_ids == vision_token_id).sum().item()
-        n_image_features = vision_embeds.shape[0]
-
-        if n_image_tokens != n_image_features:
-            raise ValueError(
-                f"Image features and image tokens do not match: tokens: {n_image_tokens}, features {n_image_features}"
-            )
-        vision_mask = (input_ids == vision_token_id).unsqueeze(-1).expand_as(inputs_embeds).to(inputs_embeds.device)
-
-        image_embeds = vision_embeds.to(inputs_embeds.device, inputs_embeds.dtype)
-        inputs_embeds = inputs_embeds.masked_scatter(vision_mask, image_embeds)
-
-        return inputs_embeds
-
-    def prompt_wrap_audio(
-        self, input_ids, inputs_embeds, audio_embeds, audio_embeds_lengths, placeholder_audio_loc_lens
-    ):
-        """Merge audio embeddings into input embeddings.
-
-        If ``placeholder_audio_loc_lens`` is *None* (the normal case when
-        running under vLLM, which expands placeholder tokens via
-        ``PromptReplacement`` rather than the HF processor), it is computed
-        on-the-fly by scanning ``input_ids`` for contiguous runs of the
-        ``<audioPatch>`` token.
-        """
-        if placeholder_audio_loc_lens is None:
-            audio_patch_token_id = getattr(self.config, "audio_patch_token", None)
-            if audio_patch_token_id is None:
-                raise ValueError(
-                    "placeholder_audio_loc_lens is None and config.audio_patch_token "
-                    "is not set. Set audio_patch_token in BailingMM2Config (the "
-                    "token ID of <audioPatch>) so that placeholder locations can "
-                    "be inferred from input_ids."
-                )
-            placeholder_audio_loc_lens = compute_placeholder_loc_lens(input_ids, audio_patch_token_id)
-
-        inputs_embeds = patch_continuous_features(
-            input_embeddings=inputs_embeds,
-            placeholder_loc_lens=placeholder_audio_loc_lens,
-            encoded_feats=audio_embeds,
-            encoded_feat_lens=audio_embeds_lengths,
-        )
-        router_mask_audio = build_modality_mask(placeholder_audio_loc_lens, inputs_embeds.shape[:-1])
-        router_mask_audio = router_mask_audio.to(inputs_embeds.device)
-        return inputs_embeds, router_mask_audio
-
-    def prompt_wrap_navit(
-        self,
-        input_ids,
-        config,
-        query_embeds_image=None,
-        query_embeds_video=None,
-        query_embeds_audio=None,
-        query_embeds_audio_lengths=None,
-        placeholder_audio_loc_lens=None,
-    ):
-        """Merge all multimodal embeddings."""
-        inputs_embeds = self.word_embeddings(input_ids)
-        vision_mask = None
-        audio_mask = None
-        if query_embeds_image is None and query_embeds_video is None and query_embeds_audio is None:
-            return inputs_embeds, vision_mask, audio_mask
-
-        if query_embeds_image is not None:
-            inputs_embeds = self.prompt_wrap_vision(
-                input_ids, inputs_embeds, query_embeds_image, config.image_patch_token
-            )
-        if query_embeds_video is not None:
-            inputs_embeds = self.prompt_wrap_vision(
-                input_ids, inputs_embeds, query_embeds_video, config.video_patch_token
-            )
-
-        image_mask = input_ids == config.image_patch_token
-        video_mask = input_ids == config.video_patch_token
-        vision_mask = (image_mask + video_mask) > 0
-        vision_mask = vision_mask.unsqueeze(-1).to(input_ids.device)
-
-        if query_embeds_audio is not None:
-            inputs_embeds, audio_mask = self.prompt_wrap_audio(
-                input_ids,
-                inputs_embeds,
-                query_embeds_audio,
-                query_embeds_audio_lengths,
-                placeholder_audio_loc_lens,
-            )
-
-        return inputs_embeds, vision_mask, audio_mask
-
     def forward(
         self,
         input_ids: torch.Tensor,
         positions: torch.Tensor,
         intermediate_tensors: IntermediateTensors | None = None,
         inputs_embeds: torch.Tensor | None = None,
-        query_embeds_image: torch.Tensor | None = None,
-        query_embeds_video: torch.Tensor | None = None,
-        query_embeds_audio: torch.Tensor | None = None,
-        query_embeds_audio_lengths: torch.Tensor | None = None,
-        placeholder_audio_loc_lens: torch.Tensor | None = None,
-        image_grid_thw: torch.Tensor | None = None,
-        image_grid_thw_video: torch.Tensor | None = None,
         attention_mask: torch.Tensor | None = None,
+        image_mask: torch.Tensor | None = None,
+        audio_mask: torch.Tensor | None = None,
         **kwargs,
     ) -> torch.Tensor | IntermediateTensors:
         """Forward pass for BailingMoeV2 model.
@@ -1225,42 +1122,22 @@ class BailingMoeV2Model(nn.Module):
             input_ids: Input token IDs
             positions: Position IDs (3D for multimodal)
             intermediate_tensors: Intermediate tensors for pipeline parallelism
-            inputs_embeds: Pre-computed input embeddings (optional)
-            query_embeds_image: Image embeddings
-            query_embeds_video: Video embeddings
-            query_embeds_audio: Audio embeddings
-            query_embeds_audio_lengths: Lengths of audio embeddings
-            placeholder_audio_loc_lens: Audio placeholder locations
-            image_grid_thw: Image grid dimensions (T, H, W)
-            image_grid_thw_video: Video grid dimensions (T, H, W)
+            inputs_embeds: Pre-computed input embeddings from embed_input_ids
             attention_mask: Attention mask for padding (batch, seq_len)
+            image_mask: Pre-computed vision MoE routing mask
+            audio_mask: Pre-computed audio MoE routing mask
 
         Returns:
             Hidden states or IntermediateTensors for pipeline parallelism
         """
         if get_pp_group().is_first_rank:
-            # Merge multimodal embeddings
             if inputs_embeds is not None:
                 hidden_states = inputs_embeds
+            else:
+                # XXX: This won't be run through for now, for future PP setups
+                hidden_states = self.word_embeddings(input_ids)
                 image_mask = None
                 audio_mask = None
-            else:
-                if (
-                    query_embeds_image is None and query_embeds_video is None and query_embeds_audio is None
-                ) or input_ids.size(1) == 1:
-                    hidden_states = self.word_embeddings(input_ids)
-                    image_mask = None
-                    audio_mask = None
-                else:
-                    hidden_states, image_mask, audio_mask = self.prompt_wrap_navit(
-                        input_ids,
-                        self.config,
-                        query_embeds_image,
-                        query_embeds_video,
-                        query_embeds_audio,
-                        query_embeds_audio_lengths,
-                        placeholder_audio_loc_lens,
-                    )
             residual = None
         else:
             assert intermediate_tensors is not None

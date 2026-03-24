@@ -27,6 +27,7 @@ from vllm.model_executor.models.interfaces import (
     SupportsMultiModal,
     SupportsPP,
 )
+from vllm.model_executor.models.module_mapping import MultiModelKeys
 from vllm.model_executor.models.utils import (
     init_vllm_registered_model,
     maybe_prefix,
@@ -76,6 +77,9 @@ class MingFlashOmniForConditionalGeneration(
 
     Supports Multi-Dimensional RoPE (MRoPE) for 3D position encoding in multimodal contexts.
     """
+
+    supports_multimodal = True
+    requires_raw_input_tokens: bool = True
 
     def __init__(self, *, vllm_config: VllmConfig, prefix: str = ""):
         super().__init__()
@@ -221,10 +225,13 @@ class MingFlashOmniForConditionalGeneration(
 
         return loaded_weights
 
-    def get_mm_mapping(self) -> str | None:
-        """Get multimodal mapping configuration."""
-        # TODO: Implement when multimodal support is added
-        return None
+    def get_mm_mapping(self) -> MultiModelKeys:
+        """Get the module prefix mapping for multimodal components."""
+        return MultiModelKeys.from_string_field(
+            language_model="thinker.llm",
+            connector=["thinker.linear_proj.", "thinker.linear_proj_audio."],
+            tower_model=["thinker.vision.", "thinker.audio."],
+        )
 
     @property
     def sampler(self):
@@ -232,6 +239,20 @@ class MingFlashOmniForConditionalGeneration(
         if hasattr(self.model, "sampler"):
             return self.model.sampler
         return None
+
+    def embed_input_ids(
+        self,
+        input_ids: torch.Tensor,
+        multimodal_embeddings=None,
+        *,
+        is_multimodal=None,
+    ) -> torch.Tensor:
+        """Delegate to active model for token + multimodal embedding merge."""
+        return self.model.embed_input_ids(
+            input_ids,
+            multimodal_embeddings,
+            is_multimodal=is_multimodal,
+        )
 
     def embed_multimodal(self, **kwargs):
         """Delegate to active model for multimodal processing."""

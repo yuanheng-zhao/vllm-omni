@@ -52,7 +52,13 @@ from vllm.sequence import IntermediateTensors
 from vllm_omni.model_executor.custom_process_mixin import CustomProcessMixin
 from vllm_omni.model_executor.models.output_templates import OmniOutput
 from vllm_omni.transformers_utils.configs.ming_flash_omni import BailingMM2Config, MingFlashOmniThinkerConfig
-from vllm_omni.transformers_utils.processors.ming import MingFlashOmniProcessor, MingWhisperFeatureExtractor
+from vllm_omni.transformers_utils.processors.ming import (
+    PLACEHOLDER_AUDIO_TOKEN_IN_TEXT,
+    PLACEHOLDER_IMAGE_TOKEN_IN_TEXT,
+    PLACEHOLDER_VIDEO_TOKEN_IN_TEXT,
+    MingFlashOmniProcessor,
+    MingWhisperFeatureExtractor,
+)
 
 from .components import (
     AudioProjector,
@@ -239,32 +245,9 @@ class MingFlashOmniThinkerMultiModalProcessor(BaseMultiModalProcessor[MingFlashO
         Returns:
             List of PromptUpdate objects defining token replacements.
         """
-        from vllm_omni.transformers_utils.processors.ming import (
-            PLACEHOLDER_AUDIO_TOKEN_IN_TEXT,
-            PLACEHOLDER_IMAGE_TOKEN_IN_TEXT,
-            PLACEHOLDER_VIDEO_TOKEN_IN_TEXT,
-        )
 
         tokenizer = self.info.get_tokenizer()
         vocab = tokenizer.get_vocab()
-
-        def _get_placeholder_ids(token_str: str) -> list[int] | None:
-            """Get token IDs for a placeholder string.
-
-            First tries vocab lookup (fast path for single special tokens).
-            Falls back to tokenizer.encode() which handles multi-token cases
-            and tokens stored with SentencePiece prefixes (e.g. '▁<IMAGE>').
-            """
-            single_id = vocab.get(token_str)
-            if single_id is not None:
-                return [single_id]
-            ids = tokenizer.encode(token_str, add_special_tokens=False)
-            return ids if ids else None
-
-        # High-level placeholder token IDs (targets for replacement)
-        image_placeholder_ids = _get_placeholder_ids(PLACEHOLDER_IMAGE_TOKEN_IN_TEXT)
-        video_placeholder_ids = _get_placeholder_ids(PLACEHOLDER_VIDEO_TOKEN_IN_TEXT)
-        audio_placeholder_ids = _get_placeholder_ids(PLACEHOLDER_AUDIO_TOKEN_IN_TEXT)
 
         # Low-level patch/delimiter token IDs (used in replacement sequences)
         image_start_token = vocab.get("<image>", vocab.get("<|image|>", None))
@@ -373,37 +356,33 @@ class MingFlashOmniThinkerMultiModalProcessor(BaseMultiModalProcessor[MingFlashO
 
         # Image replacement
         if "image" in mm_items and mm_items.get_items("image", ImageProcessorItems):
-            if image_placeholder_ids is not None:
-                updates.append(
-                    PromptReplacement(
-                        modality="image",
-                        target=image_placeholder_ids,
-                        replacement=get_replacement_image,
-                    )
+            updates.append(
+                PromptReplacement(
+                    modality="image",
+                    target=PLACEHOLDER_IMAGE_TOKEN_IN_TEXT,
+                    replacement=get_replacement_image,
                 )
+            )
 
         # Video replacement
         if "video" in mm_items and mm_items.get_items("video", VideoProcessorItems):
-            if video_placeholder_ids is not None:
-                updates.append(
-                    PromptReplacement(
-                        modality="video",
-                        target=video_placeholder_ids,
-                        replacement=get_replacement_video,
-                    )
+            updates.append(
+                PromptReplacement(
+                    modality="video",
+                    target=PLACEHOLDER_VIDEO_TOKEN_IN_TEXT,
+                    replacement=get_replacement_video,
                 )
+            )
 
         # Audio replacement
         if "audio" in mm_items and mm_items.get_items("audio", AudioProcessorItems):
-            if audio_placeholder_ids is not None:
-                updates.append(
-                    PromptReplacement(
-                        modality="audio",
-                        target=audio_placeholder_ids,
-                        replacement=get_replacement_audio,
-                    )
+            updates.append(
+                PromptReplacement(
+                    modality="audio",
+                    target=PLACEHOLDER_AUDIO_TOKEN_IN_TEXT,
+                    replacement=get_replacement_audio,
                 )
-
+            )
         return updates
 
     def _get_mm_fields_config(
@@ -458,6 +437,21 @@ class MingFlashOmniThinkerMultiModalProcessor(BaseMultiModalProcessor[MingFlashO
         if "placeholder_audio_loc_lens" in hf_inputs:
             config["placeholder_audio_loc_lens"] = MultiModalFieldConfig.batched("audio")
 
+        audio_feats_shape = None
+        audio_feats_lengths_val = None
+        if "audio_feats" in hf_inputs:
+            af = hf_inputs["audio_feats"]
+            audio_feats_shape = af.shape if hasattr(af, "shape") else type(af)
+        if "audio_feats_lengths" in hf_inputs:
+            audio_feats_lengths_val = hf_inputs["audio_feats_lengths"]
+        logger.info(
+            "[DIAG _get_mm_fields_config] hf_inputs_keys=%s, "
+            "audio_feats_shape=%s, audio_feats_lengths=%s, config_keys=%s",
+            list(hf_inputs.keys()),
+            audio_feats_shape,
+            audio_feats_lengths_val,
+            list(config.keys()),
+        )
         return config
 
     def _call_hf_processor(
@@ -630,8 +624,6 @@ class MingFlashOmniThinkerForConditionalGeneration(
             logger.info("Initialized WhisperAudioEncoder and AudioProjector")
 
         # Resolve audio_patch_token from the tokenizer if not already set in the config.
-        # This is required by prompt_wrap_audio() to compute placeholder_audio_loc_lens
-        # on-the-fly when upstream vLLM expands placeholders
         if self.audio is not None and getattr(llm_config, "audio_patch_token", None) is None:
             from vllm.transformers_utils.tokenizer import get_tokenizer
 
@@ -772,6 +764,40 @@ class MingFlashOmniThinkerForConditionalGeneration(
 
         return audio_embeds.to(audio_feats.dtype), audio_embeds_lengths
 
+    def _compute_modality_masks(self, input_ids: torch.Tensor) -> tuple[torch.Tensor | None, torch.Tensor | None]:
+        """Compute vision and audio MoE-routing masks from input_ids.
+
+        Returns:
+            (vision_mask, audio_mask) — each is ``None`` when the modality is
+            absent, otherwise a bool tensor suitable for the MoE MultiRouter.
+        """
+        # BailingMoeV2Config
+        llm_config = self.config
+
+        # vLLM model runner passes 1D [total_tokens] input_ids,
+        # but the MoE block expects 2D [B, T]. Normalize here.
+        ids_2d = input_ids if input_ids.ndim == 2 else input_ids.unsqueeze(0)
+
+        # vision mask
+        image_token = getattr(llm_config, "image_patch_token", None)
+        video_token = getattr(llm_config, "video_patch_token", None)
+        vision_mask = None
+        if image_token is not None or video_token is not None:
+            mask = torch.zeros_like(ids_2d, dtype=torch.bool)
+            if image_token is not None:
+                mask = mask | (ids_2d == image_token)
+            if video_token is not None:
+                mask = mask | (ids_2d == video_token)
+            vision_mask = mask.unsqueeze(-1).to(ids_2d.device)
+
+        # audio mask
+        audio_token = getattr(llm_config, "audio_patch_token", None)
+        audio_mask = None
+        if audio_token is not None:
+            audio_mask = ids_2d == audio_token  # [B, T] bool
+
+        return vision_mask, audio_mask
+
     def embed_multimodal(self, **kwargs: object) -> MultiModalEmbeddings:
         """Encode multimodal inputs and return per-item 2D embedding tensors.
 
@@ -851,84 +877,37 @@ class MingFlashOmniThinkerForConditionalGeneration(
         """
         Forward pass with multimodal inputs.
 
-        This method follows vLLM's standard interface for omni models.
-
         Args:
-            input_ids: Input token IDs [batch_size, seq_len]
+            input_ids: Input token IDs. Must contain original placeholder
+                tokens for MoE mask computation;
             positions: Token positions (3D for MRoPE)
             intermediate_tensors: Intermediate tensors from previous pipeline stages
-            inputs_embeds: Optional pre-computed input embeddings
-            **kwargs: Additional multimodal arguments:
-                - pixel_values: Image pixel values
-                - image_grid_thw: Image grid dimensions
-                - video_grid_thw: Video grid dimensions
-                - audio_feats: Audio mel spectrogram features
-                - audio_feats_lengths: Audio feature lengths
-                - placeholder_audio_loc_lens: Audio placeholder locations
+            inputs_embeds: Pre-computed input embeddings from embed_input_ids
 
         Returns:
             OmniOutput with text hidden states and multimodal outputs
         """
-        # Extract multimodal data from kwargs
-        pixel_values = kwargs.get("pixel_values")
-        image_grid_thw = kwargs.get("image_grid_thw")
-        video_grid_thw = kwargs.get("video_grid_thw")
-        audio_feats = kwargs.get("audio_feats")
-        audio_feats_lengths = kwargs.get("audio_feats_lengths")
-        placeholder_audio_loc_lens = kwargs.get("placeholder_audio_loc_lens")
-
-        # Process images
-        query_embeds_image = None
-        query_embeds_video = None
-        if pixel_values is not None and self.vision is not None:
-            # Combine image and video grids if both present
-            if image_grid_thw is not None and video_grid_thw is not None:
-                grid_thw = torch.cat([image_grid_thw, video_grid_thw], dim=0)
-            elif image_grid_thw is not None:
-                grid_thw = image_grid_thw
-            elif video_grid_thw is not None:
-                grid_thw = video_grid_thw
-            else:
-                grid_thw = None
-
-            if grid_thw is not None:
-                image_embeds = self.extract_image_feature(pixel_values, grid_thw)
-
-                # Split back into image and video if needed
-                if image_grid_thw is not None and video_grid_thw is not None:
-                    # Calculate split point based on actual feature lengths
-                    # This is a simplification; actual split logic may differ
-                    query_embeds_image = image_embeds  # TODO: proper split
-                    query_embeds_video = None
-                elif video_grid_thw is not None:
-                    query_embeds_video = image_embeds
-                else:
-                    query_embeds_image = image_embeds
-
-        # Process audio
-        query_embeds_audio = None
-        query_embeds_audio_lengths = None
-        if audio_feats is not None and self.audio is not None:
-            query_embeds_audio, query_embeds_audio_lengths = self.extract_audio_feature(
-                audio_feats, audio_feats_lengths
+        if inputs_embeds is not None:
+            assert input_ids is not None, (
+                "input_ids required for MoE modality mask computation; "
+                "Ensure requires_raw_input_tokens=True is propagated."
             )
-
-        # Forward through LLM with multimodal embeddings
-        # The LLM's forward method will call BailingMoeV2Model.prompt_wrap_navit()
-        # to merge embeddings internally
-        hidden_states = self.llm.forward(
-            input_ids=input_ids,
-            positions=positions,
-            intermediate_tensors=intermediate_tensors,
-            inputs_embeds=inputs_embeds,
-            query_embeds_image=query_embeds_image,
-            query_embeds_video=query_embeds_video,
-            query_embeds_audio=query_embeds_audio,
-            query_embeds_audio_lengths=query_embeds_audio_lengths,
-            placeholder_audio_loc_lens=placeholder_audio_loc_lens,
-            image_grid_thw=image_grid_thw,
-            image_grid_thw_video=video_grid_thw,
-        )
+            image_mask, audio_mask = self._compute_modality_masks(input_ids)
+            hidden_states = self.llm.forward(
+                input_ids=input_ids,
+                positions=positions,
+                intermediate_tensors=intermediate_tensors,
+                inputs_embeds=inputs_embeds,
+                image_mask=image_mask,
+                audio_mask=audio_mask,
+            )
+        else:
+            # Text-only path: no multimodal embeddings, no masks needed.
+            hidden_states = self.llm.forward(
+                input_ids=input_ids,
+                positions=positions,
+                intermediate_tensors=intermediate_tensors,
+            )
 
         # Capture embeddings for downstream stages
         multimodal_outputs = {
