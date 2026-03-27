@@ -20,6 +20,11 @@ from vllm.model_executor.models.utils import AutoWeightsLoader
 from vllm_omni.diffusion.data import DiffusionOutput, OmniDiffusionConfig
 from vllm_omni.diffusion.distributed.autoencoders.autoencoder_kl_wan import DistributedAutoencoderKLWan
 from vllm_omni.diffusion.distributed.cfg_parallel import CFGParallelMixin
+from vllm_omni.diffusion.distributed.parallel_state import (
+    get_sequence_parallel_world_size,
+    get_sp_group,
+    model_parallel_is_initialized,
+)
 from vllm_omni.diffusion.distributed.utils import get_local_device
 from vllm_omni.diffusion.model_loader.diffusers_loader import DiffusersPipelineLoader
 from vllm_omni.diffusion.models.interface import SupportImageInput
@@ -487,6 +492,9 @@ class Wan22I2VPipeline(
             latents=req.sampling_params.latents,
             last_image=last_image_tensor,
         )
+        # Sync initial noise across SP ranks
+        if model_parallel_is_initialized() and get_sequence_parallel_world_size() > 1:
+            get_sp_group().broadcast(latents, src=0)
 
         if DEBUG_PERF:
             current_omni_platform.synchronize()
