@@ -15,5 +15,4 @@ __all__ = [
     "MingFlashOmniThinkerProcessingInfo",
     "MingFlashOmniThinkerMultiModalProcessor",
     "MingFlashOmniThinkerDummyInputsBuilder",
-    "MingFlashOmniProcessor",
 ]

@@ -103,12 +103,11 @@ class AudioProjector(nn.Module):
                 stride=ds_stride,
                 padding=ds_kernel_size // 2,
             ),
-            Transpose(-1, -2),
+            Transpose(-1, -2),  # [B, audio_dim, T'] -> [B, T', audio_dim]
         ]
         for _ in range(1, mlp_depth):
             layers.append(nn.GELU())
             layers.append(nn.Linear(llm_dim, llm_dim))
-        layers.append(Transpose(-1, -2))
         self.proj = nn.Sequential(*layers)
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
@@ -123,10 +122,7 @@ class AudioProjector(nn.Module):
         """
         # Conv1d expects [B, C, T], so transpose input
         x = x.transpose(-1, -2)  # [B, audio_dim, T]
-        x = self.proj(x)  # ends with Transpose(-1, -2) → [B, T', llm_dim] → transposed
-        # The final Transpose in proj converts back, so output is [B, llm_dim, T']
-        # For external callers, transpose to channel-last
-        return x.transpose(-1, -2)  # [B, T', llm_dim]
+        return self.proj(x)
 
     def compute_output_length(self, input_length: torch.Tensor) -> torch.Tensor:
         """Compute output sequence length after Conv1d downsampling.
