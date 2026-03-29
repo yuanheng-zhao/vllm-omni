@@ -15,9 +15,19 @@ import torch.nn as nn
 from vllm.logger import init_logger
 from vllm.model_executor.model_loader.weight_utils import default_weight_loader
 
-from .modeling_utils import Transpose
-
 logger = init_logger(__name__)
+
+
+class Transpose(nn.Module):
+    """Transpose two dimensions of a tensor. Used in nn.Sequential pipelines."""
+
+    def __init__(self, dim0: int, dim1: int):
+        super().__init__()
+        self.dim0 = dim0
+        self.dim1 = dim1
+
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        return x.transpose(self.dim0, self.dim1)
 
 
 class VisionProjector(nn.Module):

@@ -6,8 +6,7 @@ from .modeling_bailing_moe_v2 import (
     BailingMoeV2Model,
     get_rope_index,
 )
-from .modeling_utils import Transpose
-from .projectors import AudioProjector, VisionProjector
+from .projectors import AudioProjector, Transpose, VisionProjector
 from .vision_encoder import MingVisionEncoder
 
 __all__ = [

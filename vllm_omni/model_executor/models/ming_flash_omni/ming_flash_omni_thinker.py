@@ -25,7 +25,12 @@ from vllm.model_executor.models.interfaces import (
 from vllm.model_executor.models.qwen2_vl import (
     Qwen2VLProcessingInfo,
 )
-from vllm.model_executor.models.utils import _merge_multimodal_embeddings, maybe_prefix
+from vllm.model_executor.models.utils import (
+    AutoWeightsLoader,
+    WeightsMapper,
+    _merge_multimodal_embeddings,
+    maybe_prefix,
+)
 from vllm.multimodal import MULTIMODAL_REGISTRY
 from vllm.multimodal.inputs import (
     MultiModalDataDict,
@@ -568,6 +573,12 @@ class MingFlashOmniThinkerForConditionalGeneration(
     Supports Multi-Dimensional RoPE (MRoPE) for 3D position encoding in multimodal contexts.
     """
 
+    hf_to_vllm_mapper = WeightsMapper(
+        # "model.*" (HF) -> "llm.*";
+        # vision.*, audio.*, linear_proj.*, linear_proj_audio.* already match
+        orig_to_new_prefix={"model.": "llm."},
+    )
+
     def __init__(self, *, vllm_config: VllmConfig, prefix: str = ""):
         super().__init__()
 
@@ -1024,73 +1035,5 @@ class MingFlashOmniThinkerForConditionalGeneration(
         return position_ids, mrope_position_delta
 
     def load_weights(self, weights: Iterable[tuple[str, torch.Tensor]]) -> set[str]:
-        """
-        Load weights for thinker model (LLM + encoders + projectors).
-
-        Routes weights to appropriate submodules based on name prefixes:
-        - model.* → LLM (BailingMoeV2ForCausalLM)
-        - vision.* → Vision encoder (MingVisionEncoder)
-        - audio.* → Audio encoder (WhisperAudioEncoder)
-        - linear_proj.* → Vision projector (VisionProjector)
-        - linear_proj_audio.* → Audio projector (AudioProjector)
-
-        Args:
-            weights: Iterable of (name, tensor) pairs from checkpoint.
-
-        Returns:
-            Set of successfully loaded parameter names.
-        """
-        loaded_params = set()
-
-        # Separate weights by component prefix
-        llm_weights = []
-        vision_weights = []
-        audio_weights = []
-        vision_proj_weights = []
-        audio_proj_weights = []
-
-        for name, loaded_weight in weights:
-            if name.startswith("model."):
-                llm_weights.append((name[len("model.") :], loaded_weight))
-            elif name.startswith("vision."):
-                vision_weights.append((name[len("vision.") :], loaded_weight))
-            elif name.startswith("audio."):
-                audio_weights.append((name[len("audio.") :], loaded_weight))
-            elif name.startswith("linear_proj_audio."):
-                audio_proj_weights.append((name[len("linear_proj_audio.") :], loaded_weight))
-            elif name.startswith("linear_proj."):
-                vision_proj_weights.append((name[len("linear_proj.") :], loaded_weight))
-            else:
-                logger.warning(f"Unrecognized weight prefix in thinker: {name}")
-
-        # Load LLM weights
-        if llm_weights:
-            logger.info(f"Loading {len(llm_weights)} LLM weights")
-            llm_loaded = self.llm.load_weights(llm_weights)
-            loaded_params.update([f"llm.{n}" for n in llm_loaded])
-
-        # Load vision encoder weights
-        if self.vision and vision_weights:
-            logger.info(f"Loading {len(vision_weights)} vision encoder weights")
-            vision_loaded = self.vision.load_weights(vision_weights)
-            loaded_params.update([f"vision.{n}" for n in vision_loaded])
-
-        # Load audio encoder weights
-        if self.audio and audio_weights:
-            logger.info(f"Loading {len(audio_weights)} audio encoder weights")
-            audio_loaded = self.audio.load_weights(audio_weights)
-            loaded_params.update([f"audio.{n}" for n in audio_loaded])
-
-        # Load vision projector weights
-        if self.linear_proj and vision_proj_weights:
-            logger.info(f"Loading {len(vision_proj_weights)} vision projector weights")
-            vision_proj_loaded = self.linear_proj.load_weights(vision_proj_weights)
-            loaded_params.update([f"linear_proj.{n}" for n in vision_proj_loaded])
-
-        # Load audio projector weights
-        if self.linear_proj_audio and audio_proj_weights:
-            logger.info(f"Loading {len(audio_proj_weights)} audio projector weights")
-            audio_proj_loaded = self.linear_proj_audio.load_weights(audio_proj_weights)
-            loaded_params.update([f"linear_proj_audio.{n}" for n in audio_proj_loaded])
-
-        return loaded_params
+        loader = AutoWeightsLoader(self)
+        return loader.load_weights(weights, mapper=self.hf_to_vllm_mapper)
