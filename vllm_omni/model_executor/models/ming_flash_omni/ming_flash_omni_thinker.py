@@ -639,7 +639,7 @@ class MingFlashOmniThinkerForConditionalGeneration(
 
     def extract_audio_feature(
         self, audio_feats: torch.Tensor, audio_feats_lengths: torch.Tensor
-    ) -> tuple[torch.Tensor, torch.Tensor]:
+    ) -> tuple[torch.Tensor, ...]:
         """Extract and project audio features.
 
         Args:
@@ -650,15 +650,12 @@ class MingFlashOmniThinkerForConditionalGeneration(
                 N is the max number of clips per item; zero-padded entries are skipped.
 
         Returns:
-            Tuple of:
-                - audio_embeds: [total_clips, T'_max, hidden_size] projected audio
-                  embeddings, padded to the longest projected clip length.
-                - audio_embeds_lengths: [total_clips] lengths after projection.
+            Tuple of per-clip [T'_i, hidden_size] projected audio embeddings.
         """
         if self.audio is None:
             raise ValueError("Audio encoder not initialized")
 
-        # Unwrap packed [B, L_total, n_mels] into a list of [n_mels, T_i] tensors,
+        # Unwrap packed [B, L_total, n_mels] into a list of [n_mels, T'_i] tensors,
         # one per audio clip, as expected by WhisperAudioEncoder.
         x_list: list[torch.Tensor] = []
         audio_lens: list[int] = []
@@ -668,56 +665,31 @@ class MingFlashOmniThinkerForConditionalGeneration(
                 feat_len = int(audio_feats_lengths[i, j].item())
                 if feat_len == 0:
                     break
-                # audio_feats[i] is [L_total, n_mels]; slice one clip and
-                # transpose to [n_mels, T] for Conv1d.
                 mel_seg = audio_feats[i, feat_index : feat_index + feat_len].transpose(0, 1)
                 x_list.append(mel_seg)
                 audio_lens.append(feat_len)
                 feat_index += feat_len
 
-        audio_embeds_packed = self.audio(x_list, audio_lens)
+        audio_packed = self.audio(x_list, audio_lens)
 
-        # Project audio features
-        # 1) split packed format back into list, 2) project each, then 3) repack
-        # For simplicity, work with the full tensor here
-        # Maybe we want to keep packed format through projection
-        audio_embeds_list = []
-        offset = 0
-        audio_embeds_lengths = []
-        for audio_len in audio_lens:
-            encoded_len = (audio_len - 3 + 2 * 1) // 2 + 1
-            audio_segment = audio_embeds_packed[offset : offset + encoded_len]
-            offset += encoded_len
+        # Compute per-clip lengths after Whisper Conv1d (kernel=3, stride=2, pad=1)
+        encoded_lens = [(audio_len - 3 + 2) // 2 + 1 for audio_len in audio_lens]
 
-            audio_segment_proj = self.linear_proj_audio(audio_segment.unsqueeze(0))
-            audio_embeds_list.append(audio_segment_proj.squeeze(0))
+        # Project packed
+        proj_packed, proj_lens = self.linear_proj_audio.forward_packed(audio_packed, encoded_lens)
 
-            # Calculate final length after audio projector Conv1d
-            final_len = self.linear_proj_audio.compute_output_length(torch.tensor([audio_len])).item()
-            audio_embeds_lengths.append(int(final_len))
-
-        # Stack into batch format [B, max_T', hidden_size]
-        max_len = max(audio_embeds_lengths)
-        audio_embeds = torch.zeros(
-            len(audio_embeds_list),
-            max_len,
-            audio_embeds_list[0].size(-1),
-            dtype=audio_embeds_packed.dtype,
-            device=audio_embeds_packed.device,
-        )
-        for i, emb in enumerate(audio_embeds_list):
-            audio_embeds[i, : emb.size(0)] = emb
-
-        audio_embeds_lengths = torch.tensor(audio_embeds_lengths, dtype=torch.long, device=audio_embeds.device)
-
-        if (
+        normalize = (
             self.thinker_config
             and self.thinker_config.audio_config
             and getattr(self.thinker_config.audio_config, "norm_query_embeds", False)
-        ):
-            audio_embeds = F.normalize(audio_embeds, dim=2)
+        )
+        if normalize:
+            proj_packed = F.normalize(proj_packed, dim=-1)
 
-        return audio_embeds.to(audio_feats.dtype), audio_embeds_lengths
+        proj_packed = proj_packed.to(audio_feats.dtype)
+
+        # Split into per-clip tensors
+        return proj_packed.split(proj_lens)
 
     def _compute_modality_masks(self, input_ids: torch.Tensor) -> tuple[torch.Tensor | None, torch.Tensor | None]:
         """Compute vision and audio MoE-routing masks from input_ids.
@@ -783,10 +755,8 @@ class MingFlashOmniThinkerForConditionalGeneration(
         audio_feats: torch.Tensor | None = kwargs.get("audio_feats")  # type: ignore[assignment]
         audio_feats_lengths: torch.Tensor | None = kwargs.get("audio_feats_lengths")  # type: ignore[assignment]
         if audio_feats is not None and audio_feats_lengths is not None and self.audio is not None:
-            audio_embeds, audio_embeds_lengths = self.extract_audio_feature(audio_feats, audio_feats_lengths)
-            for i in range(audio_embeds.size(0)):
-                length = int(audio_embeds_lengths[i].item())
-                embeddings.append(audio_embeds[i, :length, :])
+            audio_clips = self.extract_audio_feature(audio_feats, audio_feats_lengths)
+            embeddings.extend(audio_clips)
 
         return tuple(embeddings)
 

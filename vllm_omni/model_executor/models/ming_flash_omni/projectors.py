@@ -83,7 +83,6 @@ class AudioProjector(nn.Module):
         1. Conv1d: [B, audio_dim, T] → [B, llm_dim, T']  (temporal downsampling)
         2. Transpose to [B, T', llm_dim]
         3. Optional MLP layers: GELU + Linear (repeated mlp_depth-1 times)
-        4. Transpose back to [B, llm_dim, T'] (for compatibility with wrap_feats)
 
     Args:
         audio_dim: Audio encoder output dimension (n_state).
@@ -113,7 +112,7 @@ class AudioProjector(nn.Module):
                 stride=ds_stride,
                 padding=ds_kernel_size // 2,
             ),
-            Transpose(-1, -2),  # [B, audio_dim, T'] -> [B, T', audio_dim]
+            Transpose(-1, -2),  # [B, llm_dim, T'] -> [B, T', llm_dim]
         ]
         for _ in range(1, mlp_depth):
             layers.append(nn.GELU())
@@ -133,6 +132,39 @@ class AudioProjector(nn.Module):
         # Conv1d expects [B, C, T], so transpose input
         x = x.transpose(-1, -2)  # [B, audio_dim, T]
         return self.proj(x)
+
+    def forward_packed(
+        self,
+        packed: torch.Tensor,
+        encoded_lens: list[int],
+    ) -> tuple[torch.Tensor, list[int]]:
+        """Project packed audio features from the Whisper encoder.
+
+        Args:
+            packed: [total_T', audio_dim] packed encoder output.
+            encoded_lens: Length of each clip after Whisper encoding.
+
+        Returns:
+            Tuple of:
+                - [total_T'', llm_dim] packed projected features.
+                - List of projected lengths per clip.
+        """
+        conv1d = self.proj[0]
+        mlp = self.proj[2:]
+
+        # Split packed tensor per clip for Conv1d
+        segments = packed.split(encoded_lens)
+        conv_segments = []
+        proj_lens: list[int] = []
+        for seg in segments:
+            out = conv1d(seg.transpose(0, 1).unsqueeze(0))  # [1, llm_dim, T'_i]
+            out = out.squeeze(0).transpose(0, 1)  # [T'_i, llm_dim]
+            conv_segments.append(out)
+            proj_lens.append(out.shape[0])
+
+        packed_proj = torch.cat(conv_segments, dim=0)  # [total_T'', llm_dim]
+        packed_proj = mlp(packed_proj)
+        return packed_proj, proj_lens
 
     def compute_output_length(self, input_length: torch.Tensor) -> torch.Tensor:
         """Compute output sequence length after Conv1d downsampling.
