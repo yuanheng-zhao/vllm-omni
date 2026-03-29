@@ -103,7 +103,7 @@ class BailingMoeV2Config(PretrainedConfig):
         self.max_window_layers = max_window_layers
         self.head_dim = head_dim or self.hidden_size // self.num_attention_heads
         self.rope_scaling = rope_scaling
-        self.use_qk_norm = use_qk_norm  # unused
+        self.use_qk_norm = use_qk_norm  # arg unused; QK norm is always applied
 
         # MoE configs
         self.num_experts = num_experts

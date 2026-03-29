@@ -128,6 +128,7 @@ class MingWhisperFeatureExtractor(FeatureExtractionMixin):
         #      (conv1 has stride=1 and does not change T)
         #   2. AudioProjector Conv1d: kernel=3, stride=2, padding=1
         # Combined: T → ((T-1)//2 + 1 - 1)//2 + 1
+        # See also: AudioProjector.compute_output_length()
         encoder_feats_lengths = ((audio_feats_lengths - 3 + 2 * 1) // 2 + 1 - 3 + 2 * 1) // 2 + 1
         audio_feats = torch.cat(audio_feat_list, dim=0).unsqueeze(0)  # [1, T_total, n_mels]
 
@@ -229,8 +230,8 @@ class MingFlashOmniProcessor(ProcessorMixin):
                 **kwargs.get("audio_kwargs", {}),
             )
             data.update(audio_outputs)
-            if "audio_feats_lengths" in audio_outputs:
-                text = self._expand_audio_tokens(text, audio_outputs["audio_feats_lengths"])
+            if "encoder_feats_lengths" in audio_outputs:
+                text = self._expand_audio_tokens(text, audio_outputs["encoder_feats_lengths"])
 
         text_outputs = self.tokenizer(
             text,
@@ -293,14 +294,24 @@ class MingFlashOmniProcessor(ProcessorMixin):
     def _expand_audio_tokens(
         self,
         text: list[str],
-        audio_feats_lengths: torch.Tensor,
+        encoder_feats_lengths: torch.Tensor,
         special_token: str = PLACEHOLDER_AUDIO_TOKEN_IN_TEXT,
     ) -> list[str]:
-        """Expand high-level audio tokens to actual audio patch tokens"""
+        """Expand high-level audio tokens to actual audio patch tokens.
+
+        Args:
+            text: List of prompt strings containing audio placeholders.
+            encoder_feats_lengths: [B, N] number of embedding tokens per audio
+                clip **after** encoder + projector convolutions (i.e. the
+                encoder_feats_lengths produced by MingWhisperFeatureExtractor).
+            special_token: The placeholder token to replace.
+        """
         prompt_strings = []
-        for sample, audio_feats_length_tensor in zip(text, audio_feats_lengths):
-            for audio_feats_length in audio_feats_length_tensor:
-                num_patches = int(audio_feats_length.item())
+        for sample, lengths_tensor in zip(text, encoder_feats_lengths):
+            for length in lengths_tensor:
+                num_patches = int(length.item())
+                if num_patches == 0:
+                    continue
                 audio_text = DEFAULT_AU_START_TOKEN + (DEFAULT_AUDIO_PATCH_TOKEN * num_patches) + DEFAULT_AU_END_TOKEN
                 if special_token in sample:
                     sample = sample.replace(special_token, audio_text, 1)

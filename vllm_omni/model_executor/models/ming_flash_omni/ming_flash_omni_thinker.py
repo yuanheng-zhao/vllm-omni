@@ -22,8 +22,8 @@ from vllm.model_executor.models.interfaces import (
     SupportsMultiModal,
     SupportsPP,
 )
-from vllm.model_executor.models.qwen2_5_vl import (
-    Qwen2_5_VLProcessingInfo,
+from vllm.model_executor.models.qwen2_vl import (
+    Qwen2VLProcessingInfo,
 )
 from vllm.model_executor.models.utils import _merge_multimodal_embeddings, maybe_prefix
 from vllm.multimodal import MULTIMODAL_REGISTRY
@@ -43,6 +43,7 @@ from vllm.multimodal.parse import (
 from vllm.multimodal.processing import (
     BaseDummyInputsBuilder,
     BaseMultiModalProcessor,
+    BaseProcessingInfo,
     PromptReplacement,
     PromptUpdate,
     PromptUpdateDetails,
@@ -75,11 +76,10 @@ logger = init_logger(__name__)
 # === Multimodal Processor Classes === #
 
 
-class MingFlashOmniThinkerProcessingInfo(Qwen2_5_VLProcessingInfo):
+class MingFlashOmniThinkerProcessingInfo(BaseProcessingInfo):
     """Processing info for Ming-flash-omni Thinker stage.
 
-    Provides access to HuggingFace config, processor, and tokenizer for
-    multimodal input processing.
+    Ming uses the same `Qwen2VLImageProcessor` for vision
     """
 
     def get_hf_config(self) -> BailingMM2Config:
@@ -92,17 +92,35 @@ class MingFlashOmniThinkerProcessingInfo(Qwen2_5_VLProcessingInfo):
     def get_target_channels(self) -> int:
         """Return target audio channels (mono).
 
+        This method is left for notes at this moment,
         See `_normalize_audio_tensor` in vllm_omni/transformers_utils/processors/ming.py
         """
         return 1
 
-    def get_supported_mm_limits(self) -> Mapping[str, int | None]:
-        """Get supported multimodal limits.
+    def get_image_processor(self, **kwargs: object):
+        """Return the Qwen2VL-compatible image processor."""
+        return self.get_hf_processor(**kwargs).image_processor
 
-        Returns:
-            Dict with None (unlimited) for image, video, and audio.
-        """
+    def get_supported_mm_limits(self) -> Mapping[str, int | None]:
         return {"image": None, "video": None, "audio": None}
+
+    def _get_vl_max_tokens(
+        self,
+        seq_len: int,
+        mm_counts: Mapping[str, int],
+    ) -> Mapping[str, int]:
+        """Delegate vision token-count math to Qwen2VLProcessingInfo.
+
+        Ming shares the same Qwen2VL image processor and ViT patch/merge
+        parameters, so the token-count calculation is identical.
+        We call the Qwen2VL methods as unbound on `self`, which provides
+        the required `get_hf_config()` and `get_image_processor()`.
+        """
+        return Qwen2VLProcessingInfo.get_mm_max_tokens_per_item(
+            self,  # type: ignore[arg-type]
+            seq_len=seq_len,
+            mm_counts=mm_counts,
+        )
 
     def get_mm_max_tokens_per_item(
         self,
@@ -114,15 +132,11 @@ class MingFlashOmniThinkerProcessingInfo(Qwen2_5_VLProcessingInfo):
         mm_max_tokens: dict[str, int] = {}
 
         if requested_modalities & {"image", "video"}:
-            vl_tokens = Qwen2_5_VLProcessingInfo.get_mm_max_tokens_per_item(
-                self,
-                seq_len=seq_len,
-                mm_counts=mm_counts,
-            )
+            vl_tokens = self._get_vl_max_tokens(seq_len=seq_len, mm_counts=mm_counts)
             mm_max_tokens.update({m: vl_tokens[m] for m in ["image", "video"] if m in requested_modalities})
 
         if "audio" in requested_modalities:
-            # TODO: HARDCODED for now
+            # TODO: compute from audio config instead of hardcoding
             mm_max_tokens["audio"] = 3000
 
         return mm_max_tokens
@@ -131,7 +145,6 @@ class MingFlashOmniThinkerProcessingInfo(Qwen2_5_VLProcessingInfo):
         hf_processor = self.get_hf_processor(**kwargs)
         feature_extractor = hf_processor.audio_processor  # type: ignore
         assert isinstance(feature_extractor, MingWhisperFeatureExtractor)
-
         return feature_extractor
 
     def get_data_parser(self):
