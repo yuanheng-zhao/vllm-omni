@@ -66,14 +66,10 @@ from vllm_omni.transformers_utils.processors.ming import (
     MingWhisperFeatureExtractor,
 )
 
-from .components import (
-    AudioProjector,
-    BailingMoeV2ForCausalLM,
-    MingVisionEncoder,
-    VisionProjector,
-    WhisperAudioEncoder,
-    get_rope_index,
-)
+from .audio_encoder import WhisperAudioEncoder
+from .modeling_bailing_moe_v2 import BailingMoeV2ForCausalLM, get_rope_index
+from .projectors import AudioProjector, VisionProjector
+from .vision_encoder import MingVisionEncoder
 
 logger = init_logger(__name__)
 
