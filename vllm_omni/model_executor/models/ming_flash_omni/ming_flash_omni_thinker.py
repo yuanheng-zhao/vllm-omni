@@ -707,7 +707,6 @@ class MingFlashOmniThinkerForConditionalGeneration(
                 mask = mask | (input_ids == image_token)
             if video_token is not None:
                 mask = mask | (input_ids == video_token)
-            vision_mask = mask.unsqueeze(-1)
 
         # audio mask
         audio_token = getattr(llm_config, "audio_patch_token", None)

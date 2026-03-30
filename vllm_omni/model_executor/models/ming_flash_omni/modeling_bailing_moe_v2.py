@@ -549,20 +549,26 @@ class BailingMoeV2SparseMoeBlock(nn.Module):
 
         if self.router_type == "MultiRouter":
             if image_mask is not None:
-                if len(image_mask.shape) == 3:
-                    assert image_mask.shape[-1] == 1
-                elif len(image_mask.shape) == 2:
+                if image_mask.ndim == 1:
+                    # vLLM path: flat tokens [T] -> [T, 1]
+                    image_mask = image_mask.view(-1, 1)
+                elif image_mask.ndim == 2:
                     assert image_mask.shape == hidden_states.shape[:2]
                     image_mask = image_mask.unsqueeze(-1)
+                elif image_mask.ndim == 3:
+                    assert image_mask.shape[-1] == 1
                 else:
                     raise ValueError(f"Unsupported image_mask shape: {image_mask.shape}")
 
             if audio_mask is not None:
-                if len(audio_mask.shape) == 3:
-                    assert audio_mask.shape[-1] == 1
-                elif len(audio_mask.shape) == 2:
+                if audio_mask.ndim == 1:
+                    # vLLM path: flat tokens [T] -> [T, 1]
+                    audio_mask = audio_mask.view(-1, 1)
+                elif audio_mask.ndim == 2:
                     assert audio_mask.shape == hidden_states.shape[:2]
                     audio_mask = audio_mask.unsqueeze(-1)
+                elif audio_mask.ndim == 3:
+                    assert audio_mask.shape[-1] == 1
                 else:
                     raise ValueError(f"Unsupported audio_mask shape: {audio_mask.shape}")
 
