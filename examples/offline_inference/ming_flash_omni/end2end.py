@@ -1,5 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
+# Partial example cases are referred from
+# https://github.com/inclusionAI/Ming/blob/3954fcb880ff5e61ff128bcf7f1ec344d46a6fe3/cookbook.ipynb
 import os
 import time
 from typing import NamedTuple
@@ -8,6 +10,7 @@ import librosa
 import numpy as np
 import vllm
 from PIL import Image
+from transformers import AutoProcessor
 from vllm import SamplingParams
 from vllm.assets.audio import AudioAsset
 from vllm.assets.image import ImageAsset
@@ -18,16 +21,11 @@ from vllm.utils.argparse_utils import FlexibleArgumentParser
 import vllm_omni
 from vllm_omni.entrypoints.omni import Omni
 
+# Imports the processor also registers itself
+from vllm_omni.transformers_utils.processors.ming import MingFlashOmniProcessor  # noqa: F401
+
 SEED = 42
-
-# Ming's settings from https://github.com/inclusionAI/Ming
-SYSTEM_PROMPT_NOTHINK = "你是一个友好的AI助手。\n\ndetailed thinking off"
-SYSTEM_PROMPT_THINK = "你是一个友好的AI助手。\n\ndetailed thinking on"
-EOS_TOKEN = "<|role_end|>"
-
-IMAGE_TOKEN = "<IMAGE>"
-VIDEO_TOKEN = "<VIDEO>"
-AUDIO_TOKEN = "<AUDIO>"
+MODEL_NAME = "Jonathan1909/Ming-flash-omni-2.0"
 
 
 class QueryResult(NamedTuple):
@@ -35,28 +33,24 @@ class QueryResult(NamedTuple):
     limit_mm_per_prompt: dict[str, int]
 
 
-def build_prompt(user_text: str, think: bool = False) -> str:
-    """Build a Ming chat prompt with role tags."""
-    system = SYSTEM_PROMPT_THINK if think else SYSTEM_PROMPT_NOTHINK
-    return f"<role>SYSTEM</role>{system}{EOS_TOKEN}<role>HUMAN</role>{user_text}{EOS_TOKEN}<role>ASSISTANT</role>"
-
-
-def get_text_query(question: str | None = None) -> QueryResult:
+def get_text_query(processor: MingFlashOmniProcessor, question: str | None = None) -> QueryResult:
     if question is None:
         question = "请详细介绍鹦鹉的生活习性。"
+    conversation = [{"role": "HUMAN", "content": question}]
+    prompt = processor.apply_chat_template(conversation, tokenize=False)
     return QueryResult(
-        inputs={"prompt": build_prompt(question)},
+        inputs={"prompt": prompt},
         limit_mm_per_prompt={},
     )
 
 
 def get_image_query(
+    processor: MingFlashOmniProcessor,
     question: str | None = None,
     image_path: str | None = None,
 ) -> QueryResult:
     if question is None:
         question = "Describe this image in detail."
-    prompt = build_prompt(f"{IMAGE_TOKEN}{question}")
 
     if image_path:
         if not os.path.exists(image_path):
@@ -64,6 +58,17 @@ def get_image_query(
         image_data = convert_image_mode(Image.open(image_path), "RGB")
     else:
         image_data = convert_image_mode(ImageAsset("cherry_blossom").pil_image, "RGB")
+
+    conversation = [
+        {
+            "role": "HUMAN",
+            "content": [
+                {"type": "image", "image": image_data},
+                {"type": "text", "text": question},
+            ],
+        }
+    ]
+    prompt = processor.apply_chat_template(conversation, tokenize=False)
 
     return QueryResult(
         inputs={
@@ -75,13 +80,13 @@ def get_image_query(
 
 
 def get_audio_query(
+    processor: MingFlashOmniProcessor,
     question: str | None = None,
     audio_path: str | None = None,
     sampling_rate: int = 16000,
 ) -> QueryResult:
     if question is None:
         question = "Please recognize the language of this speech and transcribe it. Format: oral."
-    prompt = build_prompt(f"{AUDIO_TOKEN}{question}")
 
     if audio_path:
         if not os.path.exists(audio_path):
@@ -90,6 +95,18 @@ def get_audio_query(
         audio_data = (audio_signal.astype(np.float32), sr)
     else:
         audio_data = AudioAsset("mary_had_lamb").audio_and_sample_rate
+
+    # Use a string for "audio" so the processor counts it as 1 audio input
+    conversation = [
+        {
+            "role": "HUMAN",
+            "content": [
+                {"type": "audio", "audio": "input"},
+                {"type": "text", "text": question},
+            ],
+        }
+    ]
+    prompt = processor.apply_chat_template(conversation, tokenize=False)
 
     return QueryResult(
         inputs={
@@ -101,13 +118,13 @@ def get_audio_query(
 
 
 def get_video_query(
+    processor: MingFlashOmniProcessor,
     question: str | None = None,
     video_path: str | None = None,
     num_frames: int = 16,
 ) -> QueryResult:
     if question is None:
         question = "Describe what is happening in this video."
-    prompt = build_prompt(f"{VIDEO_TOKEN}{question}")
 
     if video_path:
         if not os.path.exists(video_path):
@@ -115,6 +132,17 @@ def get_video_query(
         video_frames = video_to_ndarrays(video_path, num_frames=num_frames)
     else:
         video_frames = VideoAsset(name="baby_reading", num_frames=num_frames).np_ndarrays
+
+    conversation = [
+        {
+            "role": "HUMAN",
+            "content": [
+                {"type": "video"},
+                {"type": "text", "text": question},
+            ],
+        }
+    ]
+    prompt = processor.apply_chat_template(conversation, tokenize=False)
 
     return QueryResult(
         inputs={
@@ -126,13 +154,13 @@ def get_video_query(
 
 
 def get_mixed_modalities_query(
+    processor: MingFlashOmniProcessor,
     image_path: str | None = None,
     audio_path: str | None = None,
     sampling_rate: int = 16000,
 ) -> QueryResult:
     """Mixed image + audio understanding."""
-    question = "Describe the image and transcribe the audio."
-    prompt = build_prompt(f"{IMAGE_TOKEN}{AUDIO_TOKEN}{question}")
+    question = "Describe the image, and recognize the language of this speech and transcribe it. Format: oral"
 
     if image_path:
         if not os.path.exists(image_path):
@@ -149,6 +177,18 @@ def get_mixed_modalities_query(
     else:
         audio_data = AudioAsset("mary_had_lamb").audio_and_sample_rate
 
+    conversation = [
+        {
+            "role": "HUMAN",
+            "content": [
+                {"type": "image", "image": image_data},
+                {"type": "audio", "audio": "input"},
+                {"type": "text", "text": question},
+            ],
+        }
+    ]
+    prompt = processor.apply_chat_template(conversation, tokenize=False)
+
     return QueryResult(
         inputs={
             "prompt": prompt,
@@ -159,19 +199,50 @@ def get_mixed_modalities_query(
 
 
 def get_reasoning_query(
+    processor: MingFlashOmniProcessor,
     question: str | None = None,
     image_path: str | None = None,
 ) -> QueryResult:
     if question is None:
-        question = "What is the sum of all prime numbers less than 50?"
-    # Enable thinking mode for step-by-step reasoning
-    prompt = build_prompt(question, think=True)
+        # NOTE: To use the following default question, input with example figure provided by Ming
+        # https://github.com/inclusionAI/Ming/blob/3954fcb880ff5e61ff128bcf7f1ec344d46a6fe3/figures/cases/3_0.png
+        # E.g.,
+        # python examples/offline_inference/ming_flash_omni/end2end.py -q reasoning --image-path ./3_0.png
+        # Otherwise, the problem solving might be false.
+        question = (
+            "Based on the following rules:\n•\tYou control the smiley face character\n"
+            "•\tYou can move up, down, left, and right, and only a single square at a time\n"
+            "•\tWalls are dark grey and cannot be moved into\n•\tThe brown square is a box\n•"
+            "\tThe box can be pushed by moving into it (i.e., if you are in the square "
+            "adjacent to the box to the left, and move onto the square with the box, "
+            "the box will move one square to the right).\n"
+            "•\tThe box cannot be pushed into walls\n"
+            "•\tThe blue door at the bottom is locked and cannot be passed through, "
+            "unless the box is placed on the blue square\n"
+            "•\tThe square beneath the blue door is the exit\n"
+            "•\tMoving from one square to another\n\n"
+            "Let's assume a coordinate system where the smiley face is "
+            "on the top left at (1,1) and the square below it is (1,2). "
+            "The smiley face performs the following moves: {down, right, right, right}, "
+            "such that the smiley face is at square (4,2) and the box is in square (5,2). "
+            "What are the next sequence of moves that must be done to move the box down to (5,3)? "
+            "Give your answer as a comma separated list."
+        )
 
     if image_path:
         if not os.path.exists(image_path):
             raise FileNotFoundError(f"Image file not found: {image_path}")
         image_data = convert_image_mode(Image.open(image_path), "RGB")
-        prompt = build_prompt(f"{IMAGE_TOKEN}{question}", think=True)
+        conversation = [
+            {
+                "role": "HUMAN",
+                "content": [
+                    {"type": "image", "image": image_data},
+                    {"type": "text", "text": question},
+                ],
+            }
+        ]
+        prompt = processor.apply_chat_template(conversation, tokenize=False, use_cot_system_prompt=True)
         return QueryResult(
             inputs={
                 "prompt": prompt,
@@ -180,6 +251,8 @@ def get_reasoning_query(
             limit_mm_per_prompt={"image": 1},
         )
 
+    conversation = [{"role": "HUMAN", "content": question}]
+    prompt = processor.apply_chat_template(conversation, tokenize=False, use_cot_system_prompt=True)
     return QueryResult(
         inputs={"prompt": prompt},
         limit_mm_per_prompt={},
@@ -197,7 +270,6 @@ query_map = {
 
 
 def main(args):
-    model_name = "Jonathan1909/Ming-flash-omni-2.0"
     print(
         "=" * 20,
         "\n",
@@ -207,27 +279,31 @@ def main(args):
         sep="",
     )
 
+    processor = AutoProcessor.from_pretrained(MODEL_NAME, trust_remote_code=True)
+    assert isinstance(processor, MingFlashOmniProcessor), f"Wrong processor type being used: {type(processor)}"
+
     query_func = query_map[args.query_type]
     if args.query_type == "use_image":
-        query_result = query_func(image_path=args.image_path)
+        query_result = query_func(processor, image_path=args.image_path)
     elif args.query_type == "use_audio":
-        query_result = query_func(audio_path=args.audio_path, sampling_rate=args.sampling_rate)
+        query_result = query_func(processor, audio_path=args.audio_path, sampling_rate=args.sampling_rate)
     elif args.query_type == "use_video":
-        query_result = query_func(video_path=args.video_path, num_frames=args.num_frames)
+        query_result = query_func(processor, video_path=args.video_path, num_frames=args.num_frames)
     elif args.query_type == "use_mixed_modalities":
         query_result = query_func(
+            processor,
             image_path=args.image_path,
             audio_path=args.audio_path,
             sampling_rate=args.sampling_rate,
         )
     elif args.query_type == "reasoning":
-        query_result = query_func(image_path=args.image_path)
+        query_result = query_func(processor, image_path=args.image_path)
     else:
-        query_result = query_func()
+        query_result = query_func(processor)
 
     # Initialize Omni (with thinker-only stage config)
     omni = Omni(
-        model=model_name,
+        model=MODEL_NAME,
         stage_configs_path=args.stage_configs_path,
         log_stats=args.log_stats,
         init_timeout=args.init_timeout,
@@ -379,7 +455,7 @@ def parse_args():
     parser.add_argument(
         "--max-tokens",
         type=int,
-        default=2048,
+        default=4096,
         help="Maximum tokens to generate.",
     )
     parser.add_argument(

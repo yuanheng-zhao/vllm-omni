@@ -13,6 +13,17 @@ Please refer to the [stage configuration documentation](https://docs.vllm.ai/pro
 python end2end.py --query-type text
 ```
 
+#### Reasoning (Thinking Mode)
+
+Reasoning (Thinking) mode is enabled via applying "detailed thinking on" when building the system prompt template (in `apply_chat_template`).
+
+In the end2end example, a default problem for thinking mode is provided, as referred to the example usage of Ming's cookbook;
+To utilize it, you have to download the example figure from https://github.com/inclusionAI/Ming/blob/3954fcb880ff5e61ff128bcf7f1ec344d46a6fe3/figures/cases/3_0.png
+
+```bash
+python examples/offline_inference/ming_flash_omni/end2end.py -q reasoning --image-path ./3_0.png
+```
+
 ### Image understanding
 ```bash
 python end2end.py --query-type use_image
@@ -51,6 +62,8 @@ To control output modalities (e.g. text-only output):
 ```bash
 python end2end.py --query-type use_audio --modalities text
 ```
+
+*For now, only text output is supported*
 
 ### Custom stage config
 ```bash
