@@ -903,18 +903,12 @@ class BailingMoeV2Model(nn.Module):
             if inputs_embeds is not None:
                 hidden_states = inputs_embeds
             else:
-                # TODO: won't be run for now, for future PP setups
                 hidden_states = self.word_embeddings(input_ids)
-                image_mask = None
-                audio_mask = None
             residual = None
         else:
             assert intermediate_tensors is not None
             hidden_states = intermediate_tensors["hidden_states"]
             residual = intermediate_tensors["residual"]
-            # Masks are not passed through pipeline
-            image_mask = None
-            audio_mask = None
 
         for layer in self.layers[self.start_layer : self.end_layer]:
             hidden_states, residual = layer(

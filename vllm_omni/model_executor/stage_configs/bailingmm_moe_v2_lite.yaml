@@ -24,6 +24,7 @@ stage_args:
       enable_prefix_caching: false
       max_num_batched_tokens: 32768
       tensor_parallel_size: 4  # Use 4 GPUs for MoE model
+      # pipeline_parallel_size: 4
       hf_config_name: llm_config
       # profiler usage
       # profiler_config:

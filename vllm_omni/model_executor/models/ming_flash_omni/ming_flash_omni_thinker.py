@@ -702,11 +702,11 @@ class MingFlashOmniThinkerForConditionalGeneration(
         video_token = getattr(llm_config, "video_patch_token", None)
         vision_mask = None
         if image_token is not None or video_token is not None:
-            mask = torch.zeros_like(input_ids, dtype=torch.bool)
+            vision_mask = torch.zeros_like(input_ids, dtype=torch.bool)
             if image_token is not None:
-                mask = mask | (input_ids == image_token)
+                vision_mask = vision_mask | (input_ids == image_token)
             if video_token is not None:
-                mask = mask | (input_ids == video_token)
+                vision_mask = vision_mask | (input_ids == video_token)
 
         # audio mask
         audio_token = getattr(llm_config, "audio_patch_token", None)
@@ -781,27 +781,16 @@ class MingFlashOmniThinkerForConditionalGeneration(
         **kwargs,
     ) -> OmniOutput:
         """Forward pass with multimodal inputs."""
-        if inputs_embeds is not None:
-            assert input_ids is not None, (
-                "input_ids required for MoE modality mask computation; "
-                "Ensure requires_raw_input_tokens=True is propagated."
-            )
-            image_mask, audio_mask = self._compute_modality_masks(input_ids)
-            hidden_states = self.llm.forward(
-                input_ids=input_ids,
-                positions=positions,
-                intermediate_tensors=intermediate_tensors,
-                inputs_embeds=inputs_embeds,
-                image_mask=image_mask,
-                audio_mask=audio_mask,
-            )
-        else:
-            # Text-only path: no multimodal embeddings, no masks needed.
-            hidden_states = self.llm.forward(
-                input_ids=input_ids,
-                positions=positions,
-                intermediate_tensors=intermediate_tensors,
-            )
+        # Compute MoE modality masks on every device
+        image_mask, audio_mask = self._compute_modality_masks(input_ids)
+        hidden_states = self.llm.forward(
+            input_ids=input_ids,
+            positions=positions,
+            intermediate_tensors=intermediate_tensors,
+            inputs_embeds=inputs_embeds,
+            image_mask=image_mask,
+            audio_mask=audio_mask,
+        )
 
         # Capture embeddings for downstream stages
         multimodal_outputs = {
