@@ -46,7 +46,6 @@ from vllm.model_executor.layers.rotary_embedding.mrope import MRotaryEmbedding
 from vllm.model_executor.layers.vocab_parallel_embedding import ParallelLMHead, VocabParallelEmbedding
 from vllm.model_executor.model_loader.weight_utils import default_weight_loader
 from vllm.model_executor.models.utils import (
-    AutoWeightsLoader,
     PPMissingLayer,
     WeightsMapper,
     make_empty_intermediate_tensors_factory,
@@ -352,29 +351,6 @@ class BailingMoeV2MLP(nn.Module):
         x = self.act_fn(gate_up)
         x, _ = self.down_proj(x)
         return x
-
-    def load_weights(self, weights: Iterable[tuple[str, torch.Tensor]]) -> set[str]:
-        stacked_params_mapping = [
-            ("gate_up_proj", "gate_proj", 0),
-            ("gate_up_proj", "up_proj", 1),
-        ]
-        params_dict = dict(self.named_parameters(remove_duplicate=False))
-        loaded_params: set[str] = set()
-        for name, loaded_weight in weights:
-            for param_name, weight_name, shard_id in stacked_params_mapping:
-                if weight_name not in name:
-                    continue
-                name = name.replace(weight_name, param_name)
-                param = params_dict[name]
-                weight_loader = param.weight_loader
-                weight_loader(param, loaded_weight, shard_id)
-                break
-            else:
-                param = params_dict[name]
-                weight_loader = getattr(param, "weight_loader", default_weight_loader)
-                weight_loader(param, loaded_weight)
-            loaded_params.add(name)
-        return loaded_params
 
 
 class BailingMoeV2Gate(nn.Module):
@@ -742,29 +718,6 @@ class BailingMoeV2Attention(nn.Module):
         output, _ = self.dense(attn_output)
         return output
 
-    def load_weights(self, weights: Iterable[tuple[str, torch.Tensor]]) -> set[str]:
-        stacked_params_mapping = [
-            # BailingMoE stores fused query_key_value in the checkpoint
-            ("qkv_proj", "query_key_value", None),
-        ]
-        params_dict = dict(self.named_parameters(remove_duplicate=False))
-        loaded_params: set[str] = set()
-        for name, loaded_weight in weights:
-            for param_name, weight_name, shard_id in stacked_params_mapping:
-                if weight_name not in name:
-                    continue
-                name = name.replace(weight_name, param_name)
-                param = params_dict[name]
-                weight_loader = param.weight_loader
-                weight_loader(param, loaded_weight, shard_id)
-                break
-            else:
-                param = params_dict[name]
-                weight_loader = getattr(param, "weight_loader", default_weight_loader)
-                weight_loader(param, loaded_weight)
-            loaded_params.add(name)
-        return loaded_params
-
 
 class BailingMoeV2DecoderLayer(nn.Module):
     """Decoder layer with attention and MoE MLP."""
@@ -1068,9 +1021,57 @@ class BailingMoeV2ForCausalLM(nn.Module, CustomProcessMixin):
 
     def load_weights(self, weights: Iterable[tuple[str, torch.Tensor]]) -> set[str]:
         """Load weights from HuggingFace checkpoint."""
-        mapper = WeightsMapper(
+        stacked_params_mapping = [
+            # (param_name, weight_name, shard_id)
+            # BailingMoE stores fused QKV in checkpoint as query_key_value
+            ("qkv_proj", "query_key_value", None),
+            # Dense MLP and shared_experts gate/up are stored separately
+            ("gate_up_proj", "gate_proj", 0),
+            ("gate_up_proj", "up_proj", 1),
+        ]
+
+        # Gate router linear layers: checkpoint `{r}.weight` -> model `{r}.gate.weight`
+        gate_name_mapper = WeightsMapper(
             orig_to_new_substr={f".{r}.weight": f".{r}.gate.weight" for r in ("gate", "image_gate", "audio_gate")}
         )
 
-        loader = AutoWeightsLoader(self)
-        return loader.load_weights(weights, mapper=mapper)
+        # FusedMoE expert params mapping is identical across all MoE layers
+        expert_params_mapping: list[tuple[str, str, int, str]] = []
+        for layer in self.model.layers:
+            if hasattr(layer, "mlp") and hasattr(layer.mlp, "experts"):
+                expert_params_mapping = layer.mlp.experts.expert_mapping
+                break
+
+        params_dict = dict(self.named_parameters(remove_duplicate=False))
+        loaded_params: set[str] = set()
+
+        for name, loaded_weight in gate_name_mapper.apply(weights):
+            for param_name, weight_name, shard_id in stacked_params_mapping:
+                if weight_name not in name or "mlp.experts" in name:
+                    continue
+                name = name.replace(weight_name, param_name)
+                param = params_dict.get(name)
+                if param is not None:
+                    weight_loader = param.weight_loader
+                    weight_loader(param, loaded_weight, shard_id)
+                    loaded_params.add(name)
+                break
+            else:
+                for param_name, weight_name, expert_id, shard_id in expert_params_mapping:
+                    if weight_name not in name:
+                        continue
+                    name = name.replace(weight_name, param_name)
+                    param = params_dict.get(name)
+                    if param is not None:
+                        weight_loader = param.weight_loader
+                        weight_loader(param, loaded_weight, name, shard_id=shard_id, expert_id=expert_id)
+                        loaded_params.add(name)
+                    break
+                else:
+                    param = params_dict.get(name)
+                    if param is not None:
+                        weight_loader = getattr(param, "weight_loader", default_weight_loader)
+                        weight_loader(param, loaded_weight)
+                        loaded_params.add(name)
+
+        return loaded_params
