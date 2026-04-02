@@ -189,6 +189,8 @@ class MingFlashOmniProcessor(ProcessorMixin):
         audios: tuple[np.ndarray, int] | list[tuple[np.ndarray, int]] | None = None,
         **kwargs,
     ) -> BatchFeature:
+        # This should always be parallel implementations that mirror
+        # `_get_prompt_updates` logic in Ming processor, and vice versa.
         # Ensure text is a list
         if isinstance(text, str):
             text = [text]

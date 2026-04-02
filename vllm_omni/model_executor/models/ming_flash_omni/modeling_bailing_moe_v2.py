@@ -369,6 +369,27 @@ class BailingMoeV2SparseMoeBlock(nn.Module):
                 prefix=f"{prefix}.shared_experts",
             )
 
+    @staticmethod
+    def _normalize_mask(
+        mask: torch.Tensor,
+        bsz: int,
+        seq_len: int,
+        name: str,
+    ) -> torch.Tensor:
+        """Validate and reshape a modality mask to [bsz*seq_len, 1] bool."""
+        N = bsz * seq_len
+        if mask.ndim == 1:
+            # vLLM path: flat tokens [N]
+            assert mask.shape[0] == N, f"{name} length {mask.shape[0]} != N={N}"
+        elif mask.ndim == 2:
+            assert mask.shape == (bsz, seq_len), f"{name} shape {mask.shape} != ({bsz}, {seq_len})"
+        elif mask.ndim == 3:
+            assert mask.shape == (bsz, seq_len, 1), f"{name} shape {mask.shape} != ({bsz}, {seq_len}, 1)"
+        else:
+            raise ValueError(f"Unsupported {name} shape: {mask.shape}")
+
+        return mask.reshape(N, 1).bool()
+
     def forward(self, hidden_states, image_mask, audio_mask):
         input_is_2d = hidden_states.ndim == 2
         if input_is_2d:
@@ -379,28 +400,9 @@ class BailingMoeV2SparseMoeBlock(nn.Module):
 
         if self.router_type == "MultiRouter":
             if image_mask is not None:
-                if image_mask.ndim == 1:
-                    # vLLM path: flat tokens [T] -> [T, 1]
-                    image_mask = image_mask.view(-1, 1)
-                elif image_mask.ndim == 2:
-                    assert image_mask.shape == hidden_states.shape[:2]
-                    image_mask = image_mask.unsqueeze(-1)
-                elif image_mask.ndim == 3:
-                    assert image_mask.shape[-1] == 1
-                else:
-                    raise ValueError(f"Unsupported image_mask shape: {image_mask.shape}")
-
+                image_mask = self._normalize_mask(image_mask, bsz, seq_len, "image_mask").to(hidden_states.device)
             if audio_mask is not None:
-                if audio_mask.ndim == 1:
-                    # vLLM path: flat tokens [T] -> [T, 1]
-                    audio_mask = audio_mask.view(-1, 1)
-                elif audio_mask.ndim == 2:
-                    assert audio_mask.shape == hidden_states.shape[:2]
-                    audio_mask = audio_mask.unsqueeze(-1)
-                elif audio_mask.ndim == 3:
-                    assert audio_mask.shape[-1] == 1
-                else:
-                    raise ValueError(f"Unsupported audio_mask shape: {audio_mask.shape}")
+                audio_mask = self._normalize_mask(audio_mask, bsz, seq_len, "audio_mask").to(hidden_states.device)
 
             # if image_mask is not None and audio_mask is not None:
             #     assert torch.logical_and(image_mask, audio_mask).sum() == 0
@@ -410,16 +412,13 @@ class BailingMoeV2SparseMoeBlock(nn.Module):
             topk_idx, topk_weight, router_logits = self.gate(hidden_states)
 
             if image_mask is not None:
-                image_mask = image_mask.view(-1, 1)
-                topk_idx = image_topk_idx * image_mask + topk_idx * torch.logical_not(image_mask)
-                topk_weight = image_topk_weight * image_mask + topk_weight * torch.logical_not(image_mask)
-                router_logits = image_router_logits * image_mask + router_logits * torch.logical_not(image_mask)
+                topk_idx = torch.where(image_mask, image_topk_idx, topk_idx)
+                topk_weight = torch.where(image_mask, image_topk_weight, topk_weight)
+                router_logits = torch.where(image_mask, image_router_logits, router_logits)
             if audio_mask is not None:
-                audio_mask = audio_mask.view(-1, 1)
-                audio_mask = audio_mask.to(router_logits.device)
-                topk_idx = audio_topk_idx * audio_mask + topk_idx * torch.logical_not(audio_mask)
-                topk_weight = audio_topk_weight * audio_mask + topk_weight * torch.logical_not(audio_mask)
-                router_logits = audio_router_logits * audio_mask + router_logits * torch.logical_not(audio_mask)
+                topk_idx = torch.where(audio_mask, audio_topk_idx, topk_idx)
+                topk_weight = torch.where(audio_mask, audio_topk_weight, topk_weight)
+                router_logits = torch.where(audio_mask, audio_router_logits, router_logits)
         else:
             topk_idx, topk_weight, router_logits = self.gate(hidden_states)
 

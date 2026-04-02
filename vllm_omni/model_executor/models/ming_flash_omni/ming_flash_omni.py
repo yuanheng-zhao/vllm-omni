@@ -211,7 +211,7 @@ class MingFlashOmniForConditionalGeneration(
     def get_mm_mapping(self) -> MultiModelKeys:
         """Get the module prefix mapping for multimodal components."""
         return MultiModelKeys.from_string_field(
-            language_model="thinker.llm",
+            language_model="thinker.language_model",
             connector=["thinker.linear_proj.", "thinker.linear_proj_audio."],
             tower_model=["thinker.vision.", "thinker.audio."],
         )
