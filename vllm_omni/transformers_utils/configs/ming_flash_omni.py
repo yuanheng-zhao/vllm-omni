@@ -54,6 +54,7 @@ class BailingMoeV2Config(PretrainedConfig):
         sliding_window=81920,
         max_window_layers=28,
         rope_scaling=None,
+        mrope_section=None,
         pad_token_id=126081,
         num_experts=16,
         num_shared_experts=0,
@@ -71,10 +72,11 @@ class BailingMoeV2Config(PretrainedConfig):
         use_interleaved_frame_timestamp=True,
         # Multimodal token IDs
         image_patch_token=157157,
-        video_patch_token=157175,
         image_start_token=157158,
+        video_patch_token=157175,
         video_start_token=157159,
-        audio_patch_token=None,  # resolved from tokenizer at model init
+        audio_patch_token=157168,
+        audio_start_token=157169,
         # Position encoding parameters
         spatial_merge_size=2,
         tokens_per_second=2,
@@ -102,8 +104,26 @@ class BailingMoeV2Config(PretrainedConfig):
         self.sliding_window = sliding_window
         self.max_window_layers = max_window_layers
         self.head_dim = head_dim or self.hidden_size // self.num_attention_heads
-        self.rope_scaling = rope_scaling
         self.use_qk_norm = use_qk_norm  # arg unused; QK norm is always applied
+
+        # By default, match the value of `mrope_section`
+        # to `apply_3d_rotary_pos_emb` in Ming's repo:
+        # https://github.com/inclusionAI/Ming/blob/3954fcb880ff5e61ff128bcf7f1ec344d46a6fe3/modeling_bailing_moe_v2.py
+        if mrope_section is None:
+            mrope_section = (rope_scaling or {}).get("mrope_section", [8, 12, 12])
+        # Ensure mrope_section is stored inside rope_scaling
+        if rope_scaling is not None and isinstance(rope_scaling, dict):
+            rope_scaling = dict(rope_scaling)
+            rope_scaling.setdefault("mrope_section", mrope_section)
+        self.rope_scaling = rope_scaling
+
+        # NOTE: Expose rope_parameters["mrope_section"]
+        # This refers to the pattern used for GLM-Image in vllm_omni/patch.py
+        rope_type = (rope_scaling or {}).get("type", (rope_scaling or {}).get("rope_type", ""))
+        if rope_type in ("video_rope", "3D", "mrope"):
+            self.rope_parameters = {"mrope_section": mrope_section}
+        else:
+            self.rope_parameters = None
 
         # MoE configs
         self.num_experts = num_experts
@@ -123,9 +143,10 @@ class BailingMoeV2Config(PretrainedConfig):
         # Multimodal token IDs and position encoding
         self.image_patch_token = image_patch_token
         self.video_patch_token = video_patch_token
+        self.audio_patch_token = audio_patch_token
         self.image_start_token = image_start_token
         self.video_start_token = video_start_token
-        self.audio_patch_token = audio_patch_token
+        self.audio_start_token = audio_start_token
         self.spatial_merge_size = spatial_merge_size
         self.tokens_per_second = tokens_per_second
 

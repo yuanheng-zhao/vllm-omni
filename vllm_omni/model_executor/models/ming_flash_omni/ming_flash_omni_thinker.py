@@ -6,14 +6,13 @@
 
 """Ming-flash-omni-2.0 Thinker stage implementation (multimodal understanding)."""
 
-from collections.abc import Iterable, Mapping, Sequence
+from collections.abc import Iterable, Iterator, Mapping, Sequence
 from typing import Any
 
 import numpy as np
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
-from transformers.configuration_utils import PretrainedConfig
 from transformers.feature_extraction_utils import BatchFeature
 from vllm.config import VllmConfig
 from vllm.config.multimodal import BaseDummyOptions
@@ -68,7 +67,7 @@ from vllm_omni.transformers_utils.processors.ming import (
 )
 
 from .audio_encoder import WhisperAudioEncoder
-from .modeling_bailing_moe_v2 import BailingMoeV2ForCausalLM, get_rope_index
+from .modeling_bailing_moe_v2 import BailingMoeV2ForCausalLM
 from .projectors import AudioProjector, VisionProjector
 from .vision_encoder import MingVisionEncoder
 
@@ -815,91 +814,110 @@ class MingFlashOmniThinkerForConditionalGeneration(
         """Get sampler from LLM."""
         return self.llm.sampler
 
+    def iter_mm_features(
+        self,
+        mm_features: list[MultiModalFeatureSpec],
+    ) -> Iterator[tuple[int, str, dict[str, Any]]]:
+        """Iterate over image/video features sorted by token position.
+
+        Yields: (offset, modality, feature_data) where feature_data contains:
+        - image: {"grid_t", "grid_h", "grid_w", "second_per_grid_t"}
+        - video: {"grid_t", "grid_h", "grid_w", "second_per_grid_t"}
+
+        Audio features are not yielded: Ming assigns them sequential
+        text positions (same T/H/W value) rather than 3D grid positions.
+        """
+        spatial_merge_size = self.config.spatial_merge_size
+
+        for mm_feature in sorted(mm_features, key=lambda f: f.mm_position.offset):
+            if mm_feature.data is None:
+                continue
+
+            offset = mm_feature.mm_position.offset
+            modality = mm_feature.modality
+
+            if modality == "image":
+                t, h, w = mm_feature.data["image_grid_thw"].data.tolist()
+                yield (
+                    offset,
+                    "image",
+                    {
+                        "grid_t": int(t),
+                        "grid_h": int(h) // spatial_merge_size,
+                        "grid_w": int(w) // spatial_merge_size,
+                        "second_per_grid_t": 0.0,
+                    },
+                )
+            elif modality == "video":
+                t, h, w = mm_feature.data["video_grid_thw"].data.tolist()
+                second_per_grid_t = 1.0
+                spgt_field = mm_feature.data.get("second_per_grid_ts")
+                if spgt_field is not None:
+                    second_per_grid_t = float(spgt_field.data.item())
+                yield (
+                    offset,
+                    "video",
+                    {
+                        "grid_t": int(t),
+                        "grid_h": int(h) // spatial_merge_size,
+                        "grid_w": int(w) // spatial_merge_size,
+                        "second_per_grid_t": second_per_grid_t,
+                    },
+                )
+
     def get_mrope_input_positions(
         self,
         input_tokens: list[int],
         mm_features: list[MultiModalFeatureSpec] | None = None,
-        *,
-        hf_config: PretrainedConfig | None = None,
-        image_grid_thw: list[list[int]] | torch.Tensor | None = None,
-        video_grid_thw: list[list[int]] | torch.Tensor | None = None,
-        second_per_grid_ts: list[float] | None = None,
-        **kwargs,
     ) -> tuple[torch.Tensor, int]:
-        """Get MRoPE input positions and delta value for Ming-flash-omni.
+        """Compute M-RoPE input positions using mm_features directly."""
+        llm_config = self.config
+        tokens_per_second: int = getattr(llm_config, "tokens_per_second", 2)
+        seq_len = len(input_tokens)
 
-        Computes 3D position indices (T, H, W) for multimodal inputs including
-        images and videos, then returns position tensor and position delta.
+        llm_pos_ids_list: list[np.ndarray] = []
+        st = 0  # index of next unprocessed token
 
-        NOTE: Audio tokens receive standard 1D text positions (same T/H/W values)
-        in Ming's rope scheme.
+        for patch_offset, _modality, data in self.iter_mm_features(mm_features or []):
+            text_len = patch_offset - st
+            st_idx = int(llm_pos_ids_list[-1].max()) + 1 if llm_pos_ids_list else 0
+            if text_len > 0:
+                llm_pos_ids_list.append(np.broadcast_to(np.arange(text_len), (3, text_len)) + st_idx)
+                st_idx += text_len
 
-        Args:
-            input_tokens: List of input token IDs
-            mm_features: Multimodal feature specifications (optional, for vLLM integration)
-            hf_config: HuggingFace config (uses self.config if not provided)
-            image_grid_thw: Image grid dimensions [(T, H, W), ...] or tensor of shape (num_images, 3)
-            video_grid_thw: Video grid dimensions [(T, H, W), ...] or tensor of shape (num_videos, 3)
-            second_per_grid_ts: Seconds per temporal grid for videos
+            # 3-D grid positions for patch tokens
+            grid_t: int = data["grid_t"]
+            grid_h: int = data["grid_h"]
+            grid_w: int = data["grid_w"]
+            second_per_grid_t: float = data["second_per_grid_t"]
 
-        Returns:
-            Tuple of (position_ids, mrope_position_delta):
-                - position_ids: Shape (3, seq_len) with [T, H, W] position indices
-                - mrope_position_delta: Scalar offset for position expansion
-        """
-        # Use model's config if not provided
-        if hf_config is None:
-            if self.thinker_config is not None:
-                llm_config = self.thinker_config.llm_config
+            t_raw = np.arange(grid_t)
+            if second_per_grid_t > 0:
+                t_index = (t_raw * second_per_grid_t * tokens_per_second).astype(np.int64)
             else:
-                llm_config = self.config
+                t_index = t_raw.astype(np.int64)
+            t_index = np.repeat(t_index, grid_h * grid_w)
+
+            h_index = np.tile(np.arange(grid_h).repeat(grid_w), grid_t)
+            w_index = np.tile(np.arange(grid_w), grid_t * grid_h)
+
+            llm_pos_ids_list.append(np.stack([t_index, h_index, w_index]) + st_idx)
+
+            num_patches = grid_t * grid_h * grid_w
+            st = patch_offset + num_patches
+
+        if st < seq_len:
+            st_idx = int(llm_pos_ids_list[-1].max()) + 1 if llm_pos_ids_list else 0
+            tail_len = seq_len - st
+            llm_pos_ids_list.append(np.broadcast_to(np.arange(tail_len), (3, tail_len)) + st_idx)
+
+        if llm_pos_ids_list:
+            position_ids = torch.from_numpy(np.concatenate(llm_pos_ids_list, axis=1).astype(np.int64))  # (3, seq_len)
         else:
-            # Extract LLM config from thinker config if needed
-            if hasattr(hf_config, "llm_config"):
-                llm_config = hf_config.llm_config
-            else:
-                llm_config = hf_config
+            # text-only, simple sequential positions
+            position_ids = torch.arange(seq_len, dtype=torch.long).unsqueeze(0).expand(3, -1)
 
-        # Gather multimodal metadata from mm_features if provided
-        if mm_features is not None:
-            mm_kwargs = MultiModalFeatureSpec.gather_kwargs(
-                mm_features,
-                {
-                    "image_grid_thw",
-                    "video_grid_thw",
-                    "second_per_grid_ts",
-                },
-            )
-            image_grid_thw = mm_kwargs.get("image_grid_thw", image_grid_thw or [])
-            video_grid_thw = mm_kwargs.get("video_grid_thw", video_grid_thw or [])
-            second_per_grid_ts = mm_kwargs.get("second_per_grid_ts", second_per_grid_ts)
-
-        # Convert to tensors if needed
-        if image_grid_thw is not None:
-            if isinstance(image_grid_thw, list):
-                image_grid_thw = torch.tensor(image_grid_thw) if image_grid_thw else None
-        if video_grid_thw is not None:
-            if isinstance(video_grid_thw, list):
-                video_grid_thw = torch.tensor(video_grid_thw) if video_grid_thw else None
-
-        # Convert input_tokens to tensor
-        input_ids_tensor = torch.tensor([input_tokens], dtype=torch.long)
-
-        # Call get_rope_index to compute 3D positions
-        position_ids, mrope_position_deltas = get_rope_index(
-            config=llm_config,
-            input_ids=input_ids_tensor,
-            image_grid_thw=image_grid_thw,
-            video_grid_thw=video_grid_thw,
-            attention_mask=None,  # Will use default (all ones)
-            second_per_grid_ts=second_per_grid_ts,
-            use_interleaved_frame_timestamp=getattr(llm_config, "use_interleaved_frame_timestamp", True),
-        )
-
-        # Remove batch dimension for vLLM (expects shape [3, seq_len])
-        position_ids = position_ids.squeeze(1)  # [3, 1, seq_len] -> [3, seq_len]
-        mrope_position_delta = mrope_position_deltas[0, 0].item()  # Extract scalar
-
+        mrope_position_delta = int(position_ids.max().item()) + 1 - seq_len
         return position_ids, mrope_position_delta
 
     def load_weights(self, weights: Iterable[tuple[str, torch.Tensor]]) -> set[str]:
