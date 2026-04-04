@@ -26,6 +26,11 @@ stage_args:
       tensor_parallel_size: 4  # Use 4 GPUs for MoE model
       # pipeline_parallel_size: 4
       hf_config_name: llm_config
+      compilation_config:
+        pass_config:
+          # there's a version mismatch regarding vllm and flashinfer
+          # disable fuse allreduce for now
+          fuse_allreduce_rms: false
       # profiler usage
       # profiler_config:
       #   profiler: torch
