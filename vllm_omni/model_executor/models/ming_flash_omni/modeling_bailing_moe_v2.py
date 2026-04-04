@@ -31,7 +31,7 @@ from vllm.distributed import get_pp_group, get_tensor_model_parallel_world_size
 from vllm.logger import init_logger
 from vllm.model_executor.layers.activation import SiluAndMul
 from vllm.model_executor.layers.attention import Attention
-from vllm.model_executor.layers.fused_moe import FusedMoE
+from vllm.model_executor.layers.fused_moe import FusedMoE, SharedFusedMoE
 from vllm.model_executor.layers.layernorm import RMSNorm
 from vllm.model_executor.layers.linear import (
     MergedColumnParallelLinear,
@@ -311,6 +311,28 @@ class _CachedRoutingFn:
         return self._topk_weights.to(torch.float32), self._topk_ids.to(torch.int32)
 
 
+def _unpack_multi_routing(
+    hidden_states: torch.Tensor,
+    gating_output: torch.Tensor,
+    topk: int,
+    renormalize: bool,
+) -> tuple[torch.Tensor, torch.Tensor]:
+    """Stateless routing function that unpacks pre-computed routing results.
+
+    Used as `custom_routing_function` for `FusedMoE`. The caller is expected
+    to pack (topk_weight, topk_idx) into `gating_output` before
+    calling FusedMoE.forward(), and this function unpacks them.
+
+    Args:
+        gating_output: [num_tokens, top_k * 2]
+            - [:, :top_k], topk_weight (float)
+            - [:, top_k:], topk_idx   (float, cast back to int)
+    """
+    topk_weight = gating_output[:, :topk].contiguous()
+    topk_idx = gating_output[:, topk:]
+    return topk_weight.to(torch.float32), topk_idx.to(torch.int32)
+
+
 class BailingMoeV2SparseMoeBlock(nn.Module):
     """Sparse MoE block with MultiRouter support for multimodal routing.
 
@@ -325,18 +347,27 @@ class BailingMoeV2SparseMoeBlock(nn.Module):
     ):
         super().__init__()
         self.config = config
+        self.tp_size = get_tensor_model_parallel_world_size()
         self.num_experts_per_tok = config.num_experts_per_tok
 
-        # Routing function for FusedMoE (populated before each forward)
-        self._routing_fn = _CachedRoutingFn()
+        if isinstance(self.config.num_shared_experts, int) and self.config.num_shared_experts > 0:
+            self.shared_experts = BailingMoeV2MLP(
+                config=self.config,
+                intermediate_size=self.config.moe_intermediate_size * self.config.num_shared_experts,
+                quant_config=quant_config,
+                reduce_results=False,
+                prefix=f"{prefix}.shared_experts",
+            )
+        else:
+            self.shared_experts = None
 
-        # Replace nn.ModuleList of individual experts with FusedMoE
-        self.experts = FusedMoE(
+        self.experts = SharedFusedMoE(
+            shared_experts=self.shared_experts,
             num_experts=config.num_experts,
             top_k=config.num_experts_per_tok,
             hidden_size=config.hidden_size,
             intermediate_size=config.moe_intermediate_size,
-            custom_routing_function=self._routing_fn,
+            custom_routing_function=_unpack_multi_routing,
             renormalize=False,  # we handle normalization in the gate
             reduce_results=True,
             quant_config=quant_config,
@@ -361,14 +392,6 @@ class BailingMoeV2SparseMoeBlock(nn.Module):
         else:
             raise ValueError(f"Unsupported router_type: {self.router_type}")
 
-        if isinstance(self.config.num_shared_experts, int) and self.config.num_shared_experts > 0:
-            self.shared_experts = BailingMoeV2MLP(
-                config=self.config,
-                intermediate_size=self.config.moe_intermediate_size * self.config.num_shared_experts,
-                quant_config=quant_config,
-                prefix=f"{prefix}.shared_experts",
-            )
-
     @staticmethod
     def _normalize_mask(
         mask: torch.Tensor,
@@ -390,19 +413,18 @@ class BailingMoeV2SparseMoeBlock(nn.Module):
 
         return mask.reshape(N, 1).bool()
 
-    def forward(self, hidden_states, image_mask, audio_mask):
+    def forward(self, hidden_states, image_mask: torch.Tensor, audio_mask: torch.Tensor):
+        # TODO(yuanheng-zhao): revise the shapes in the flow
+        assert 2 <= hidden_states.dim() <= 3, f"{self.__class__.__name__} only supports 2D or 3D inputs"
         input_is_2d = hidden_states.ndim == 2
         if input_is_2d:
             hidden_states = hidden_states.unsqueeze(0)
 
-        identity = hidden_states
         bsz, seq_len, h = hidden_states.shape
 
         if self.router_type == "MultiRouter":
-            if image_mask is not None:
-                image_mask = self._normalize_mask(image_mask, bsz, seq_len, "image_mask").to(hidden_states.device)
-            if audio_mask is not None:
-                audio_mask = self._normalize_mask(audio_mask, bsz, seq_len, "audio_mask").to(hidden_states.device)
+            image_mask = self._normalize_mask(image_mask, bsz, seq_len, "image_mask").to(hidden_states.device)
+            audio_mask = self._normalize_mask(audio_mask, bsz, seq_len, "audio_mask").to(hidden_states.device)
 
             # if image_mask is not None and audio_mask is not None:
             #     assert torch.logical_and(image_mask, audio_mask).sum() == 0
@@ -411,35 +433,38 @@ class BailingMoeV2SparseMoeBlock(nn.Module):
             audio_topk_idx, audio_topk_weight, audio_router_logits = self.audio_gate(hidden_states)
             topk_idx, topk_weight, router_logits = self.gate(hidden_states)
 
-            if image_mask is not None:
-                topk_idx = torch.where(image_mask, image_topk_idx, topk_idx)
-                topk_weight = torch.where(image_mask, image_topk_weight, topk_weight)
-                router_logits = torch.where(image_mask, image_router_logits, router_logits)
-            if audio_mask is not None:
-                topk_idx = torch.where(audio_mask, audio_topk_idx, topk_idx)
-                topk_weight = torch.where(audio_mask, audio_topk_weight, topk_weight)
-                router_logits = torch.where(audio_mask, audio_router_logits, router_logits)
+            topk_idx = torch.where(image_mask, image_topk_idx, topk_idx)
+            topk_weight = torch.where(image_mask, image_topk_weight, topk_weight)
+            router_logits = torch.where(image_mask, image_router_logits, router_logits)
+            topk_idx = torch.where(audio_mask, audio_topk_idx, topk_idx)
+            topk_weight = torch.where(audio_mask, audio_topk_weight, topk_weight)
+            router_logits = torch.where(audio_mask, audio_router_logits, router_logits)
         else:
             topk_idx, topk_weight, router_logits = self.gate(hidden_states)
 
-        # Cache pre-computed routing for the custom_routing_function
-        self._routing_fn.cache(topk_weight, topk_idx)
+        # Pack pre-computed routing into a single tensor
+        packed_routing = torch.cat(
+            [
+                topk_weight.to(hidden_states.dtype),
+                topk_idx.to(hidden_states.dtype),
+            ],
+            dim=-1,
+        )
 
-        # FusedMoE expects 2D hidden_states and router_logits
+        # SharedFusedMoE expects 2D hidden_states and router_logits
         hidden_states_2d = hidden_states.view(-1, h)
-        y = self.experts(hidden_states_2d, router_logits)
-        y = y.view(bsz, seq_len, h)
+        result = self.experts(hidden_states_2d, packed_routing)
 
-        if hasattr(self, "shared_experts"):
-            y = y + self.shared_experts(identity)
+        if self.shared_experts is not None:
+            shared_output, fused_out = result
+        else:
+            shared_output, fused_out = None, result
 
-        if input_is_2d:
-            y = y.squeeze(0)
-            router_logits = router_logits.view(bsz, seq_len, -1).squeeze(0)
-            topk_idx = topk_idx.view(bsz, seq_len, -1).squeeze(0)
-            return y, (router_logits, topk_idx)
+        final_hidden_states = fused_out + shared_output if shared_output is not None else fused_out
 
-        return y, (router_logits.view(bsz, seq_len, -1), topk_idx.view(bsz, seq_len, -1))
+        final_hidden_states = final_hidden_states.view(bsz, seq_len, h)
+
+        return final_hidden_states.squeeze(0) if input_is_2d else final_hidden_states
 
 
 class BailingMoeV2Attention(nn.Module):
@@ -623,7 +648,6 @@ class BailingMoeV2DecoderLayer(nn.Module):
         residual: torch.Tensor | None,
         image_mask: torch.Tensor | None = None,
         audio_mask: torch.Tensor | None = None,
-        attention_mask: torch.Tensor | None = None,
     ) -> tuple[torch.Tensor, torch.Tensor]:
         """Forward pass for decoder layer.
 
@@ -633,7 +657,6 @@ class BailingMoeV2DecoderLayer(nn.Module):
             residual: Residual connection from previous layer
             image_mask: Mask for image tokens (for MultiRouter MoE)
             audio_mask: Mask for audio tokens (for MultiRouter MoE)
-            attention_mask: Attention mask for padding (batch, seq_len)
 
         Returns:
             Tuple of (hidden_states, residual)
@@ -652,7 +675,7 @@ class BailingMoeV2DecoderLayer(nn.Module):
         hidden_states, residual = self.post_attention_layernorm(hidden_states, residual)
 
         if self.is_moe:
-            hidden_states, _ = self.mlp(hidden_states, image_mask, audio_mask)
+            hidden_states = self.mlp(hidden_states, image_mask, audio_mask)
         else:
             # Dense MLP only takes hidden_states (no routing masks)
             hidden_states = self.mlp(hidden_states)
@@ -660,6 +683,16 @@ class BailingMoeV2DecoderLayer(nn.Module):
         return hidden_states, residual
 
 
+# @support_torch_compile(
+#     dynamic_arg_dims={
+#         "input_ids": 0,
+#         "positions": -1,
+#         "intermediate_tensors": 0,
+#         "inputs_embeds": 0,
+#         "image_mask": 0,
+#         "audio_mask": 0,
+#     }
+# )
 class BailingMoeV2Model(nn.Module):
     """BailingMoeV2 Model adapted from:
 
@@ -733,25 +766,9 @@ class BailingMoeV2Model(nn.Module):
         positions: torch.Tensor,
         intermediate_tensors: IntermediateTensors | None = None,
         inputs_embeds: torch.Tensor | None = None,
-        attention_mask: torch.Tensor | None = None,
         image_mask: torch.Tensor | None = None,
         audio_mask: torch.Tensor | None = None,
-        **kwargs,
     ) -> torch.Tensor | IntermediateTensors:
-        """Forward pass for BailingMoeV2 model.
-
-        Args:
-            input_ids: Input token IDs
-            positions: Position IDs (3D for multimodal)
-            intermediate_tensors: Intermediate tensors for pipeline parallelism
-            inputs_embeds: Pre-computed input embeddings from embed_input_ids
-            attention_mask: Attention mask for padding (batch, seq_len)
-            image_mask: Pre-computed vision MoE routing mask
-            audio_mask: Pre-computed audio MoE routing mask
-
-        Returns:
-            Hidden states or IntermediateTensors for pipeline parallelism
-        """
         if get_pp_group().is_first_rank:
             if inputs_embeds is not None:
                 hidden_states = inputs_embeds
@@ -770,7 +787,6 @@ class BailingMoeV2Model(nn.Module):
                 residual,
                 image_mask=image_mask,
                 audio_mask=audio_mask,
-                attention_mask=attention_mask,
             )
 
         if not get_pp_group().is_last_rank:
@@ -828,25 +844,16 @@ class BailingMoeV2ForCausalLM(nn.Module, CustomProcessMixin):
         positions: torch.Tensor,
         intermediate_tensors: IntermediateTensors | None = None,
         inputs_embeds: torch.Tensor | None = None,
-        **kwargs,
+        image_mask: torch.Tensor | None = None,
+        audio_mask: torch.Tensor | None = None,
     ):
-        """Forward pass for causal LM.
-
-        Returns:
-            torch.Tensor: Hidden states from the model.
-
-        Note:
-            When used in a unified omni model pipeline, the wrapper can convert
-            this output to OmniOutput format using:
-                OmniOutput(text_hidden_states=hidden_states,
-                          intermediate_tensors=intermediate_tensors)
-        """
         hidden_states = self.model(
             input_ids=input_ids,
             positions=positions,
             intermediate_tensors=intermediate_tensors,
             inputs_embeds=inputs_embeds,
-            **kwargs,
+            image_mask=image_mask,
+            audio_mask=audio_mask,
         )
         return hidden_states
 

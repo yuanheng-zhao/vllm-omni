@@ -756,7 +756,7 @@ class MingFlashOmniThinkerForConditionalGeneration(
         """Compute vision and audio MoE-routing masks from input_ids.
 
         Returns:
-            Tuple of vision_mask, audio_mask
+            Tuple of (vision_mask, audio_mask), each shape [seq_len] bool.
         """
         llm_config = self.config
 

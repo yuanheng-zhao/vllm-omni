@@ -57,7 +57,7 @@ class BailingMoeV2Config(PretrainedConfig):
         mrope_section=None,
         pad_token_id=126081,
         num_experts=16,
-        num_shared_experts=0,
+        num_shared_experts=1,
         num_experts_per_tok=2,
         n_group=8,
         topk_group=4,
