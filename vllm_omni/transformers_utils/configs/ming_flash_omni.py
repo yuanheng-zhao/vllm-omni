@@ -72,11 +72,14 @@ class BailingMoeV2Config(PretrainedConfig):
         use_interleaved_frame_timestamp=True,
         # Multimodal token IDs
         image_patch_token=157157,
-        image_start_token=157158,
         video_patch_token=157175,
-        video_start_token=157159,
         audio_patch_token=157168,
+        image_start_token=157158,
+        video_start_token=157160,
         audio_start_token=157169,
+        image_end_token=157159,
+        video_end_token=157161,
+        audio_end_token=157170,
         # Position encoding parameters
         spatial_merge_size=2,
         tokens_per_second=2,
@@ -147,6 +150,9 @@ class BailingMoeV2Config(PretrainedConfig):
         self.image_start_token = image_start_token
         self.video_start_token = video_start_token
         self.audio_start_token = audio_start_token
+        self.image_end_token = image_end_token
+        self.video_end_token = video_end_token
+        self.audio_end_token = audio_end_token
         self.spatial_merge_size = spatial_merge_size
         self.tokens_per_second = tokens_per_second
 

@@ -16,6 +16,7 @@ import torch.nn.functional as F
 from transformers.feature_extraction_utils import BatchFeature
 from vllm.config import VllmConfig
 from vllm.config.multimodal import BaseDummyOptions
+from vllm.inputs import MultiModalDataDict
 from vllm.logger import init_logger
 from vllm.model_executor.models.interfaces import (
     MultiModalEmbeddings,
@@ -40,7 +41,6 @@ from vllm.model_executor.models.utils import (
 )
 from vllm.multimodal import MULTIMODAL_REGISTRY
 from vllm.multimodal.inputs import (
-    MultiModalDataDict,
     MultiModalFeatureSpec,
     MultiModalFieldConfig,
     MultiModalKwargsItems,
@@ -217,21 +217,22 @@ class MingFlashOmniThinkerMultiModalProcessor(BaseMultiModalProcessor[MingFlashO
         out_mm_kwargs: MultiModalKwargsItems,
     ) -> Sequence[PromptUpdate]:
         tokenizer = self.info.get_tokenizer()
-        vocab = tokenizer.get_vocab()
+        # might want to add a fallback to resolve token ids
+        # vocab = tokenizer.get_vocab()
         thinker_config = self.info.get_hf_config()
 
         # patch/delimiter token IDs (used in replacement sequences)
         image_start_token_id = thinker_config.llm_config.image_start_token
         image_patch_token_id = thinker_config.llm_config.image_patch_token
-        image_end_token_id = vocab.get("</image>")
+        image_end_token_id = thinker_config.llm_config.image_end_token
 
         video_start_token_id = thinker_config.llm_config.video_start_token
         frame_patch_token_id = thinker_config.llm_config.video_patch_token
-        video_end_token_id = vocab.get("</video>")
+        video_end_token_id = thinker_config.llm_config.video_end_token
 
         audio_start_token_id = thinker_config.llm_config.audio_start_token
         audio_patch_token_id = thinker_config.llm_config.audio_patch_token
-        audio_end_token_id = vocab.get("</audio>")
+        audio_end_token_id = thinker_config.llm_config.audio_end_token
 
         vision_config = thinker_config.vision_config
         spatial_merge_size = vision_config.spatial_merge_size if vision_config else 2
