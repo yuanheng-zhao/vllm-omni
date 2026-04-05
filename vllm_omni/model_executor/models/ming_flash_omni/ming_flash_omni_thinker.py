@@ -102,21 +102,14 @@ class MingAudioInput(TensorSchema):
 
 
 class MingFlashOmniThinkerProcessingInfo(Qwen2VLProcessingInfo):
-    """Processing info for Ming-flash-omni Thinker stage."""
-
     def get_hf_config(self) -> BailingMM2Config:
-        """Get the HuggingFace configuration for Ming-flash-omni Thinker."""
         return self.ctx.get_hf_config(BailingMM2Config)
 
     def get_hf_processor(self, **kwargs: object):
         return self.ctx.get_hf_processor(MingFlashOmniProcessor, **kwargs)
 
     def get_target_channels(self) -> int:
-        """Return target audio channels (mono).
-
-        This method is left for notes at this moment,
-        See `_normalize_audio_tensor` in vllm_omni/transformers_utils/processors/ming.py
-        """
+        # See `_normalize_audio_tensor` in vllm_omni/transformers_utils/processors/ming.py
         return 1
 
     def get_supported_mm_limits(self) -> Mapping[str, int | None]:
@@ -160,17 +153,7 @@ class MingFlashOmniThinkerProcessingInfo(Qwen2VLProcessingInfo):
 
 
 class MingFlashOmniThinkerDummyInputsBuilder(BaseDummyInputsBuilder[MingFlashOmniThinkerProcessingInfo]):
-    """Dummy inputs builder for profiling Ming-flash-omni Thinker."""
-
     def get_dummy_text(self, mm_counts: Mapping[str, int]) -> str:
-        """Generate dummy text with multimodal placeholders.
-
-        Args:
-            mm_counts: Dict with counts for each modality (image, video, audio).
-
-        Returns:
-            String with placeholder tokens for each modality.
-        """
         num_images = mm_counts.get("image", 0)
         num_videos = mm_counts.get("video", 0)
         num_audios = mm_counts.get("audio", 0)
@@ -189,7 +172,6 @@ class MingFlashOmniThinkerDummyInputsBuilder(BaseDummyInputsBuilder[MingFlashOmn
         mm_counts: Mapping[str, int],
         mm_options: Mapping[str, BaseDummyOptions] | None = None,
     ) -> MultiModalDataDict:
-        """Generate dummy multimodal data for profiling."""
         num_images = mm_counts.get("image", 0)
         num_videos = mm_counts.get("video", 0)
         num_audios = mm_counts.get("audio", 0)
@@ -234,22 +216,6 @@ class MingFlashOmniThinkerMultiModalProcessor(BaseMultiModalProcessor[MingFlashO
         hf_processor_mm_kwargs: Mapping[str, Any],
         out_mm_kwargs: MultiModalKwargsItems,
     ) -> Sequence[PromptUpdate]:
-        """Generate prompt updates for multimodal placeholders.
-
-        Defines how placeholder tokens are replaced with the actual
-        patch tokens based on the processed multimodal data.
-        Only patch tokens (<imagePatch>, <framePatch>, <audioPatch>) receive multimodal
-        embeddings; delimiter tokens (<image>, </image>, etc.) use regular text embeddings.
-
-        Args:
-            mm_items: Parsed multimodal data items.
-            hf_processor_mm_kwargs: Kwargs for HF processor.
-            out_mm_kwargs: Output multimodal kwargs with processed features.
-
-        Returns:
-            List of PromptUpdate objects defining token replacements.
-        """
-
         tokenizer = self.info.get_tokenizer()
         vocab = tokenizer.get_vocab()
         thinker_config = self.info.get_hf_config()
@@ -381,19 +347,6 @@ class MingFlashOmniThinkerMultiModalProcessor(BaseMultiModalProcessor[MingFlashO
         hf_inputs: BatchFeature,
         hf_processor_mm_kwargs: Mapping[str, object],
     ) -> Mapping[str, MultiModalFieldConfig]:
-        """Get multimodal field configurations.
-
-        Defines how each multimodal field should be sliced into per-item chunks.
-        Qwen2VL-style image processing concatenates patches from all images into a
-        flat tensor, so we use `flat_from_sizes` for pixel_values.
-
-        Args:
-            hf_inputs: Output from HuggingFace processor.
-            hf_processor_mm_kwargs: Kwargs used for HF processor.
-
-        Returns:
-            Dict mapping field names to their configurations.
-        """
         config: dict[str, MultiModalFieldConfig] = {}
 
         # Image fields, pixel_values is flat (concatenated patches from all images)
@@ -451,15 +404,6 @@ class MingFlashOmniThinkerMultiModalProcessor(BaseMultiModalProcessor[MingFlashO
         We call the image/audio sub-processors directly (instead of going
         through `MingFlashOmniProcessor.__call__`) so that the high-level
         placeholder tokens remain **unexpanded** in the tokenized output.
-
-        Args:
-            prompt: Text prompt with placeholders.
-            mm_data: Multimodal data (images, videos, audios).
-            mm_kwargs: Multimodal processing kwargs.
-            tok_kwargs: Tokenizer kwargs.
-
-        Returns:
-            BatchFeature with processed inputs.
         """
         hf_processor = self.info.get_hf_processor()
         tokenizer = self.info.get_tokenizer()
@@ -522,19 +466,8 @@ class MingFlashOmniThinkerForConditionalGeneration(
     SupportsMRoPE,
     CustomProcessMixin,
 ):
-    """
-    Ming Thinker stage: Multimodal understanding -> text generation.
-
-    Components:
-    - Vision: MingVisionEncoder
-    - Audio: WhisperAudioEncoder
-    - LLM: BailingMoeV2ForCausalLM
-
-    The Thinker stage processes multimodal inputs (text, image, video, audio)
-    and generates text responses. It also captures intermediate embeddings
-    for downstream stages (image-gen, talker).
-
-    Supports Multi-Dimensional RoPE (MRoPE) for 3D position encoding in multimodal contexts.
+    """Ming Thinker stage: multimodal understanding
+    (text + image + video + audio) -> text generation.
     """
 
     hf_to_vllm_mapper = WeightsMapper(
@@ -799,7 +732,6 @@ class MingFlashOmniThinkerForConditionalGeneration(
         is_multimodal: torch.Tensor | None = None,
         handle_oov_mm_token: bool = False,
     ) -> torch.Tensor:
-        """Embed input token IDs and scatter multimodal embeddings."""
         inputs_embeds = self.language_model.model.word_embeddings(input_ids)
 
         if multimodal_embeddings is None or len(multimodal_embeddings) == 0:
@@ -820,7 +752,6 @@ class MingFlashOmniThinkerForConditionalGeneration(
         inputs_embeds: torch.Tensor | None = None,
         **kwargs,
     ) -> OmniOutput:
-        """Forward pass with multimodal inputs."""
         # Compute MoE modality masks on every device
         image_mask, audio_mask = self._compute_modality_masks(input_ids)
         hidden_states = self.language_model.forward(
@@ -843,16 +774,13 @@ class MingFlashOmniThinkerForConditionalGeneration(
         )
 
     def compute_logits(self, hidden_states: torch.Tensor, sampling_metadata) -> torch.Tensor | None:
-        """Compute logits from hidden states."""
         return self.language_model.compute_logits(hidden_states, sampling_metadata)
 
     def sample(self, logits: torch.Tensor, sampling_metadata):
-        """Sample next tokens from logits."""
         return self.language_model.sample(logits, sampling_metadata)
 
     @property
     def sampler(self):
-        """Get sampler from LLM."""
         return self.language_model.sampler
 
     def iter_mm_features(

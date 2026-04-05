@@ -236,15 +236,8 @@ class BailingMoeV2Gate(nn.Module):
         )
 
         self.routed_scaling_factor = config.routed_scaling_factor
-        self.bias_update_coeff = 0.001
 
         self.expert_bias = nn.Parameter(torch.zeros(self.num_experts), requires_grad=False)
-
-    def update_bias(self, distribution: torch.Tensor):
-        """Update expert bias based on load distribution."""
-        with torch.no_grad():
-            delta_bias = (distribution.mean() - distribution).sign()
-        self.expert_bias.data = self.expert_bias.data + self.bias_update_coeff * delta_bias
 
     def group_limited_topk(self, scores: torch.Tensor):
         """Group-limited top-k selection for expert routing."""
@@ -284,32 +277,6 @@ class BailingMoeV2Gate(nn.Module):
         topk_weight = topk_weight * self.routed_scaling_factor
 
         return topk_idx, topk_weight, logits
-
-
-class _CachedRoutingFn:
-    """Stateful callable that returns pre-computed routing results.
-
-    Used as `custom_routing_function` for `FusedMoE` so that
-    the multimodal multi-router logic can be computed externally.
-    """
-
-    def __init__(self):
-        self._topk_weights: torch.Tensor | None = None
-        self._topk_ids: torch.Tensor | None = None
-
-    def cache(self, topk_weights: torch.Tensor, topk_ids: torch.Tensor):
-        self._topk_weights = topk_weights
-        self._topk_ids = topk_ids
-
-    def __call__(
-        self,
-        hidden_states: torch.Tensor,
-        gating_output: torch.Tensor,
-        topk: int,
-        renormalize: bool,
-    ) -> tuple[torch.Tensor, torch.Tensor]:
-        assert self._topk_weights is not None, "call cache() before forward"
-        return self._topk_weights.to(torch.float32), self._topk_ids.to(torch.int32)
 
 
 def _unpack_multi_routing(
@@ -752,8 +719,6 @@ class BailingMoeV2Model(nn.Module):
         else:
             self.norm = PPMissingLayer()
 
-        self.rope_deltas = None
-
         self.make_empty_intermediate_tensors = make_empty_intermediate_tensors_factory(
             ["hidden_states", "residual"], config.hidden_size
         )
@@ -875,7 +840,6 @@ class BailingMoeV2ForCausalLM(nn.Module, CustomProcessMixin):
         return next_tokens
 
     def load_weights(self, weights: Iterable[tuple[str, torch.Tensor]]) -> set[str]:
-        """Load weights from HuggingFace checkpoint."""
         stacked_params_mapping = [
             # (param_name, weight_name, shard_id)
             # BailingMoE stores fused QKV in checkpoint as query_key_value

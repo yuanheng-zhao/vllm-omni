@@ -66,14 +66,7 @@ class MingFlashOmniForConditionalGeneration(
     SupportsMRoPE,
     CustomProcessMixin,
 ):
-    """
-    Unified Ming-flash-omni-2.0 model combining thinker, imagegen, and talker.
-
-    Architecture:
-    - Thinker (Stage 0): Multimodal understanding (text + image + video + audio) -> text generation
-    - Image Generator: Text embeddings -> PIL Image [NOT IMPLEMENTED YET]
-    - Talker: Text embeddings -> Audio waveform (TTS) [NOT IMPLEMENTED YET]
-    """
+    """Unified Ming-flash-omni-2.0 model combining thinker, imagegen, and talker."""
 
     supports_multimodal = True
     requires_raw_input_tokens: bool = True
@@ -140,7 +133,6 @@ class MingFlashOmniForConditionalGeneration(
         inputs_embeds: torch.Tensor | None = None,
         **kwargs,
     ) -> OmniOutput:
-        """Forward to active stage."""
         return self.model.forward(
             input_ids=input_ids,
             positions=positions,
@@ -154,7 +146,6 @@ class MingFlashOmniForConditionalGeneration(
         hidden_states: torch.Tensor,
         sampling_metadata=None,
     ) -> torch.Tensor | None:
-        """Compute logits from hidden states."""
         if hasattr(self.model, "compute_logits"):
             return self.model.compute_logits(hidden_states, sampling_metadata)
         return None
@@ -164,19 +155,16 @@ class MingFlashOmniForConditionalGeneration(
         logits: torch.Tensor,
         sampling_metadata,
     ):
-        """Sample next tokens from logits."""
         if hasattr(self.model, "sample"):
             return self.model.sample(logits, sampling_metadata)
         raise NotImplementedError("sample method not available on current stage")
 
     def get_mrope_input_positions(self, *args, **kwargs):
-        """Get MRoPE input positions - delegates to active stage model."""
         if hasattr(self.model, "get_mrope_input_positions"):
             return self.model.get_mrope_input_positions(*args, **kwargs)
         raise NotImplementedError("get_mrope_input_positions not available on current stage")
 
     def load_weights(self, weights: Iterable[tuple[str, torch.Tensor]]) -> set[str]:
-        """Load weights for all components of the Ming model."""
         loaded_weights = set()
         thinker_weights = []
         imagegen_weights = []
@@ -209,7 +197,6 @@ class MingFlashOmniForConditionalGeneration(
         return loaded_weights
 
     def get_mm_mapping(self) -> MultiModelKeys:
-        """Get the module prefix mapping for multimodal components."""
         return MultiModelKeys.from_string_field(
             language_model="thinker.language_model",
             connector=["thinker.linear_proj.", "thinker.linear_proj_audio."],
@@ -218,7 +205,6 @@ class MingFlashOmniForConditionalGeneration(
 
     @property
     def sampler(self):
-        """Get sampler from active model."""
         if hasattr(self.model, "sampler"):
             return self.model.sampler
         return None
@@ -230,7 +216,6 @@ class MingFlashOmniForConditionalGeneration(
         *,
         is_multimodal=None,
     ) -> torch.Tensor:
-        """Delegate to active model for token + multimodal embedding merge."""
         return self.model.embed_input_ids(
             input_ids,
             multimodal_embeddings,
@@ -238,5 +223,4 @@ class MingFlashOmniForConditionalGeneration(
         )
 
     def embed_multimodal(self, **kwargs):
-        """Delegate to active model for multimodal processing."""
         return self.model.embed_multimodal(**kwargs)

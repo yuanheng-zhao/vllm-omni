@@ -272,7 +272,6 @@ class MingFlashOmniProcessor(ProcessorMixin):
         video_grid_thw: torch.Tensor,
         special_token: str = PLACEHOLDER_VIDEO_TOKEN_IN_TEXT,
     ) -> list[str]:
-        """Expand high-level video tokens to actual frame patch tokens."""
         merge_size = self.spatial_merge_size
         num_patches_per_video = torch.prod(video_grid_thw, dim=1) // (merge_size**2)
         prompt_strings = []
@@ -299,15 +298,6 @@ class MingFlashOmniProcessor(ProcessorMixin):
         encoder_feats_lengths: torch.Tensor,
         special_token: str = PLACEHOLDER_AUDIO_TOKEN_IN_TEXT,
     ) -> list[str]:
-        """Expand high-level audio tokens to actual audio patch tokens.
-
-        Args:
-            text: List of prompt strings containing audio placeholders.
-            encoder_feats_lengths: [B, N] number of embedding tokens per audio
-                clip **after** encoder + projector convolutions (i.e. the
-                encoder_feats_lengths produced by MingWhisperFeatureExtractor).
-            special_token: The placeholder token to replace.
-        """
         prompt_strings = []
         for sample, lengths_tensor in zip(text, encoder_feats_lengths):
             for length in lengths_tensor:
@@ -339,7 +329,6 @@ class MingFlashOmniProcessor(ProcessorMixin):
         use_cot_system_prompt: bool = False,
         **kwargs,
     ) -> str:
-        """Apply Ming's system prompt template"""
         eos = self.tokenizer.eos_token if self.tokenizer is not None else "</s>"
         text = self.apply_system_template(sys_prompt_exp, use_cot_system_prompt) + eos
 
