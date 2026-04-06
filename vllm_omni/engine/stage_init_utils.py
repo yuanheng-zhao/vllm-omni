@@ -444,7 +444,7 @@ def initialize_diffusion_stage(
     stage_cfg: Any,
     metadata: StageMetadata,
     batch_size: int = 1,
-    stage_init_timeout: int = 600,
+    stage_init_timeout: int = 300,
 ) -> Any:
     """Build a diffusion stage client.
 
