@@ -367,7 +367,7 @@ class AsyncOmniEngine:
                         current_omni_platform.set_device_control_env_var(previous_visible_devices)
 
             logger.info("[AsyncOmniEngine] Stage %s engine launch started", metadata.stage_id)
-            complete_stage_handshake(proc, handshake_address, addresses, vllm_config)
+            complete_stage_handshake(proc, handshake_address, addresses, vllm_config, stage_init_timeout)
             logger.info("[AsyncOmniEngine] Stage %s engine startup completed", metadata.stage_id)
             assert started_stage is not None
             return started_stage
@@ -505,6 +505,7 @@ class AsyncOmniEngine:
                                     stage_cfg,
                                     metadata,
                                     batch_size=self.diffusion_batch_size,
+                                    stage_init_timeout=stage_init_timeout,
                                 )
                                 logger.info(
                                     "[AsyncOmniEngine] Stage %s initialized (diffusion, batch_size=%d)",
