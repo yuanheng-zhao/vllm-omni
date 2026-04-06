@@ -242,6 +242,12 @@ def parse_args() -> argparse.Namespace:
         action="store_true",
         help="Enable logging of diffusion pipeline stats.",
     )
+    parser.add_argument(
+        "--stage-init-timeout",
+        type=int,
+        default=600,
+        help="Timeout for initializing a single stage in seconds (default: 600s)",
+    )
     return parser.parse_args()
 
 
@@ -333,6 +339,7 @@ def main():
         "mode": "text-to-image",
         "log_stats": args.log_stats,
         "enable_diffusion_pipeline_profiler": args.enable_diffusion_pipeline_profiler,
+        "stage_init_timeout": args.stage_init_timeout,
         **lora_args,
         **quant_kwargs,
     }
