@@ -42,6 +42,7 @@ from vllm_omni.model_executor.models.output_templates import OmniOutput
 from vllm_omni.model_executor.models.utils import add_prefix_to_loaded_weights
 from vllm_omni.transformers_utils.configs.ming_flash_omni import (
     MingFlashOmniConfig,
+    MingFlashOmniTalkerConfig,
     MingFlashOmniThinkerConfig,
 )
 
@@ -110,10 +111,27 @@ class MingFlashOmniForConditionalGeneration(
             )
 
         elif self.model_stage == "talker":
-            # TODO: Implement talker (TTS) stage
-            raise NotImplementedError(
-                "Talker (TTS) stage is not yet implemented. Please use model_stage='thinker' for now."
+            if isinstance(config, MingFlashOmniConfig):
+                talker_config = config.talker_config
+            elif isinstance(config, MingFlashOmniTalkerConfig):
+                talker_config = config
+            else:
+                talker_config = config
+
+            if talker_config is None:
+                raise ValueError("talker_config is required for model_stage='talker'")
+
+            talker_vllm_config = vllm_config.with_hf_config(
+                talker_config, architectures=["MingFlashOmniTalkerForConditionalGeneration"]
             )
+            self.talker = init_vllm_registered_model(
+                vllm_config=talker_vllm_config,
+                prefix=maybe_prefix(prefix, "talker"),
+                architectures=["MingFlashOmniTalkerForConditionalGeneration"],
+            )
+            self.model = self.talker
+            self.thinker = None
+            self.imagegen = None
 
         else:
             raise ValueError(
@@ -121,9 +139,12 @@ class MingFlashOmniForConditionalGeneration(
             )
 
         # Set up intermediate tensors
-        self.make_empty_intermediate_tensors = (
-            self.thinker.make_empty_intermediate_tensors if self.model_stage == "thinker" else lambda: None
-        )
+        if self.model_stage == "thinker":
+            self.make_empty_intermediate_tensors = self.thinker.make_empty_intermediate_tensors
+        elif self.model_stage == "talker":
+            self.make_empty_intermediate_tensors = self.talker.make_empty_intermediate_tensors
+        else:
+            self.make_empty_intermediate_tensors = lambda: None
 
     def forward(
         self,
@@ -178,8 +199,15 @@ class MingFlashOmniForConditionalGeneration(
             elif name.startswith("talker."):
                 talker_weights.append((name, value))
             else:
-                # Weights without prefix go to thinker by default
-                thinker_weights.append((name, value))
+                # Weights without prefix:
+                # - For thinker stage: route to thinker (legacy layout)
+                # - For talker stage: route to talker (HF repo layout where
+                #   talker/model.safetensors contains unprefixed weights like
+                #   "model.*", "cfm.*", "aggregator.*", etc.)
+                if self.model_stage == "talker":
+                    talker_weights.append((name, value))
+                else:
+                    thinker_weights.append((name, value))
 
         if self.model_stage == "thinker" and thinker_weights:
             # Remove "thinker." prefix before loading
@@ -191,8 +219,16 @@ class MingFlashOmniForConditionalGeneration(
             thinker_loaded = add_prefix_to_loaded_weights(thinker_loaded, "thinker")
             loaded_weights.update(thinker_loaded)
 
+        if self.model_stage == "talker" and talker_weights:
+            talker_weights_stripped = [
+                (name.replace("talker.", "", 1) if name.startswith("talker.") else name, value)
+                for name, value in talker_weights
+            ]
+            talker_loaded = self.talker.load_weights(talker_weights_stripped)
+            talker_loaded = add_prefix_to_loaded_weights(talker_loaded, "talker")
+            loaded_weights.update(talker_loaded)
+
         # TODO: Load imagegen weights when implemented
-        # TODO: Load talker weights when implemented
 
         return loaded_weights
 
