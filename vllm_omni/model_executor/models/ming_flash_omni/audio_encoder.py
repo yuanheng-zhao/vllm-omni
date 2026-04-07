@@ -38,7 +38,7 @@ class MultiHeadAttention(nn.Module):
             logger.warning("flash-attn is not available. Fallback to manual PyTorch version")
         self.use_flash_attn = use_flash_attn and HAS_FLASH_ATTN
 
-    def forward(self, x: torch.Tensor, cu_seqlens: torch.Tensor | None = None) -> torch.Tensor:
+    def forward(self, x: torch.Tensor, cu_seqlens: torch.Tensor) -> torch.Tensor:
         """Forward pass with packed sequence support.
 
         Args:
@@ -147,7 +147,7 @@ class ResidualAttentionBlock(nn.Module):
         )
         self.mlp_ln = nn.LayerNorm(n_state)
 
-    def forward(self, x: torch.Tensor, cu_seqlens: torch.Tensor | None = None) -> torch.Tensor:
+    def forward(self, x: torch.Tensor, cu_seqlens: torch.Tensor) -> torch.Tensor:
         x = x + self.attn(self.attn_ln(x), cu_seqlens=cu_seqlens)
         x = x + self.mlp(self.mlp_ln(x))
         return x
