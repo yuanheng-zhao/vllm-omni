@@ -9,7 +9,6 @@ import operator
 from collections.abc import Iterable
 from itertools import accumulate
 
-import numpy as np
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
@@ -17,35 +16,9 @@ from vllm.logger import init_logger
 from vllm.model_executor.model_loader.weight_utils import default_weight_loader
 
 from vllm_omni.diffusion.attention.backends.utils.fa import HAS_FLASH_ATTN, flash_attn_varlen_func
+from vllm_omni.model_executor.models.whisper_utils import Conv1d, Linear, sinusoids
 
 logger = init_logger(__name__)
-
-
-# Ported from vllm_omni/model_executor/models/qwen3_tts/tokenizer_25hz/vq/whisper_encoder.py
-# TODO: we might want to extract util functions in future
-def sinusoids(length, channels, max_timescale=10000):
-    """Returns sinusoids for positional embedding"""
-    assert channels % 2 == 0
-    log_timescale_increment = np.log(max_timescale) / (channels // 2 - 1)
-    inv_timescales = torch.exp(-log_timescale_increment * torch.arange(channels // 2))
-    scaled_time = torch.arange(length)[:, np.newaxis] * inv_timescales[np.newaxis, :]
-    return torch.cat([torch.sin(scaled_time), torch.cos(scaled_time)], dim=1)
-
-
-# vllm_omni/model_executor/models/qwen3_tts/tokenizer_25hz/vq/whisper_encoder.py
-class Conv1d(nn.Conv1d):
-    """Conv1d with automatic dtype casting for mixed precision inference."""
-
-    def _conv_forward(self, x: torch.Tensor, weight: torch.Tensor, bias: torch.Tensor | None) -> torch.Tensor:
-        return super()._conv_forward(x, weight.to(x.dtype), None if bias is None else bias.to(x.dtype))
-
-
-# vllm_omni/model_executor/models/qwen3_tts/tokenizer_25hz/vq/whisper_encoder.py
-class Linear(nn.Linear):
-    """Linear layer with automatic dtype casting for mixed precision inference."""
-
-    def forward(self, x: torch.Tensor) -> torch.Tensor:
-        return F.linear(x, self.weight.to(x.dtype), None if self.bias is None else self.bias.to(x.dtype))
 
 
 class MultiHeadAttention(nn.Module):
