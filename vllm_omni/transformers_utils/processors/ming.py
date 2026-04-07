@@ -347,40 +347,50 @@ class MingFlashOmniProcessor(ProcessorMixin):
                 text += content
             elif isinstance(content, list):
                 # structured content with multimodal elements
-                content_str = str(content)
-                image_counts = content_str.count("<image>")
-                video_counts = content_str.count("<video>")
-                audio_counts = content_str.count("<audio>")
+                # Count existing placeholders from text items only
+                image_placeholders = 0
+                video_placeholders = 0
+                audio_placeholders = 0
+                for content_item in content:
+                    if content_item.get("type", "text") == "text":
+                        t = content_item.get("text", "")
+                        image_placeholders += t.count(PLACEHOLDER_IMAGE_TOKEN_IN_TEXT)
+                        video_placeholders += t.count(PLACEHOLDER_VIDEO_TOKEN_IN_TEXT)
+                        audio_placeholders += t.count(PLACEHOLDER_AUDIO_TOKEN_IN_TEXT)
 
+                if video_placeholders > 1:
+                    raise ValueError("Video count must be at most 1 per message!")
+
+                # Insert placeholders only for media items not already covered
                 for content_item in content:
                     content_type = content_item.get("type", "text")
 
                     if content_type == "image":
-                        # Add image placeholder if not already in content
                         image_data = content_item.get("image")
                         if image_data is not None:
                             from PIL import Image as PILImage
 
                             num_images = 1 if isinstance(image_data, (str, PILImage.Image)) else len(image_data)
-                            if image_counts < num_images:
-                                placeholder = (PLACEHOLDER_IMAGE_TOKEN_IN_TEXT + "\n") * (num_images - image_counts)
-                                text += placeholder.rstrip("\n")
-                                image_counts = num_images
+                            for _ in range(num_images):
+                                if image_placeholders > 0:
+                                    image_placeholders -= 1
+                                else:
+                                    text += PLACEHOLDER_IMAGE_TOKEN_IN_TEXT
 
                     elif content_type == "video":
-                        assert video_counts <= 1, "Video count must be at most 1 per message!"
-                        if video_counts == 0:
+                        if video_placeholders > 0:
+                            video_placeholders -= 1
+                        else:
                             text += PLACEHOLDER_VIDEO_TOKEN_IN_TEXT
-                            video_counts = 1
-
                     elif content_type == "audio":
                         audio_data = content_item.get("audio")
                         if audio_data is not None:
                             num_audios = 1 if isinstance(audio_data, str) else len(audio_data)
-                            if audio_counts < num_audios:
-                                placeholder = (PLACEHOLDER_AUDIO_TOKEN_IN_TEXT + "\n") * (num_audios - audio_counts)
-                                text += placeholder.rstrip("\n")
-                                audio_counts = num_audios
+                            for _ in range(num_audios):
+                                if audio_placeholders > 0:
+                                    audio_placeholders -= 1
+                                else:
+                                    text += PLACEHOLDER_AUDIO_TOKEN_IN_TEXT
 
                     elif content_type == "text":
                         text += content_item.get("text", "")
