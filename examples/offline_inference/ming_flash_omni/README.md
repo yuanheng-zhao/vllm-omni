@@ -70,3 +70,7 @@ python end2end.py --query-type use_audio --modalities text
 python end2end.py --query-type use_image \
     --stage-configs-path /path/to/your_config.yaml
 ```
+
+## Online serving
+
+For online serving via the OpenAI-compatible API, see [examples/online_serving/ming_flash_omni/README.md](../../online_serving/ming_flash_omni/README.md).
