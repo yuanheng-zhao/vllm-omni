@@ -50,8 +50,8 @@ class StageDiffusionClient:
         model: str,
         od_config: OmniDiffusionConfig,
         metadata: StageMetadata,
+        handshake_timeout: int,
         batch_size: int = 1,
-        handshake_timeout: int = 600,
     ) -> None:
         self.stage_id = metadata.stage_id
         self.final_output = metadata.final_output

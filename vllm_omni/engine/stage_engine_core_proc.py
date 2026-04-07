@@ -143,7 +143,7 @@ def complete_stage_handshake(
     handshake_address: str,
     addresses: EngineZmqAddresses,
     vllm_config: VllmConfig,
-    handshake_timeout: int = 600,
+    handshake_timeout: int,
 ) -> None:
     """Perform the HELLO/INIT/READY handshake with an already-spawned proc.
 
@@ -161,7 +161,7 @@ def _perform_handshake(
     handshake_address: str,
     addresses: EngineZmqAddresses,
     vllm_config: VllmConfig,
-    handshake_timeout: int = 600,
+    handshake_timeout: int,
 ) -> None:
     """Run the HELLO / INIT / READY handshake with the subprocess."""
     with zmq_socket_ctx(handshake_address, zmq.ROUTER, bind=True) as handshake_socket:

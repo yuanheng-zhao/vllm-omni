@@ -504,8 +504,8 @@ class AsyncOmniEngine:
                                     self.model,
                                     stage_cfg,
                                     metadata,
-                                    batch_size=self.diffusion_batch_size,
                                     stage_init_timeout=stage_init_timeout,
+                                    batch_size=self.diffusion_batch_size,
                                 )
                                 logger.info(
                                     "[AsyncOmniEngine] Stage %s initialized (diffusion, batch_size=%d)",

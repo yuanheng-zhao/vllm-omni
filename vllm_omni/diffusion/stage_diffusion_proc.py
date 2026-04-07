@@ -565,7 +565,7 @@ def spawn_diffusion_proc(
 def complete_diffusion_handshake(
     proc: BaseProcess,
     handshake_address: str,
-    handshake_timeout: int = 600,
+    handshake_timeout: int,
 ) -> None:
     """Wait for the diffusion subprocess to signal READY.
 
@@ -581,7 +581,7 @@ def complete_diffusion_handshake(
 def _perform_diffusion_handshake(
     proc: BaseProcess,
     handshake_address: str,
-    handshake_timeout: int = 600,
+    handshake_timeout: int,
 ) -> None:
     """Run the handshake with the diffusion subprocess."""
     with zmq_socket_ctx(handshake_address, zmq.ROUTER, bind=True) as handshake_socket:

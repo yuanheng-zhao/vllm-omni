@@ -287,7 +287,7 @@ def build_vllm_config(
 def acquire_device_locks(
     stage_id: int,
     engine_args_dict: dict[str, Any],
-    stage_init_timeout: int = 300,
+    stage_init_timeout: int,
 ) -> list[int]:
     """Acquire exclusive file locks on devices needed by this stage.
 
@@ -443,8 +443,8 @@ def initialize_diffusion_stage(
     model: str,
     stage_cfg: Any,
     metadata: StageMetadata,
+    stage_init_timeout: int,
     batch_size: int = 1,
-    stage_init_timeout: int = 300,
 ) -> Any:
     """Build a diffusion stage client.
 
@@ -452,10 +452,10 @@ def initialize_diffusion_stage(
         model: Model name or path.
         stage_cfg: Stage configuration.
         metadata: Extracted stage metadata.
+        stage_init_timeout: Timeout in seconds for stage initialization handshake
         batch_size: Maximum number of requests to batch together in the
             diffusion engine.  Passed through to ``StageDiffusionClient``
             and ultimately to ``AsyncOmni``.
-        stage_init_timeout: Timeout in seconds for stage initialization handshake
     """
     from vllm_omni.diffusion.data import OmniDiffusionConfig
     from vllm_omni.diffusion.stage_diffusion_client import StageDiffusionClient
@@ -466,7 +466,7 @@ def initialize_diffusion_stage(
     )
     if metadata.cfg_kv_collect_func is not None:
         od_config.cfg_kv_collect_func = metadata.cfg_kv_collect_func
-    return StageDiffusionClient(model, od_config, metadata, batch_size=batch_size, handshake_timeout=stage_init_timeout)
+    return StageDiffusionClient(model, od_config, metadata, handshake_timeout=stage_init_timeout, batch_size=batch_size)
 
 
 def _shutdown_or_close_resource(resource: Any, resource_name: str, stage_id: int) -> None:
