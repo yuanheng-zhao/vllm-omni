@@ -5,7 +5,7 @@ from pydantic import ConfigDict, TypeAdapter
 from vllm.config import ModelConfig
 from vllm.config.utils import config
 from vllm.logger import init_logger
-from vllm.transformers_utils.config import _CONFIG_REGISTRY, get_hf_text_config
+from vllm.transformers_utils.config import get_hf_text_config
 from vllm.transformers_utils.model_arch_config_convertor import (
     ModelArchConfigConvertorBase,
 )
@@ -13,42 +13,6 @@ from vllm.transformers_utils.model_arch_config_convertor import (
 import vllm_omni.model_executor.models as me_models
 
 logger = init_logger(__name__)
-
-# NOTE: vLLM-Omni custom configs
-# Map model_type -> config module name, config class name
-_OMNI_CONFIG_REGISTRY: dict[str, tuple[str, str]] = {
-    # ming_flash_omni configs
-    "bailing_moe_v2": ("ming_flash_omni", "BailingMoeV2Config"),
-    "bailingmm_moe_v2_lite": ("ming_flash_omni", "BailingMM2Config"),
-    "ming_flash_omni_thinker": ("ming_flash_omni", "MingFlashOmniThinkerConfig"),
-    "ming_flash_omni": ("ming_flash_omni", "MingFlashOmniConfig"),
-    # mammoth_moda2 configs
-    "mammothmoda2": ("mammoth_moda2", "Mammothmoda2Config"),
-    "mammothmoda2_qwen2_5_vl": ("mammoth_moda2", "Mammothmoda2Qwen2_5_VLConfig"),
-    "mammothmoda2_qwen2_5_vl_text": ("mammoth_moda2", "Mammothmoda2Qwen2_5_VLTextConfig"),
-    "mammothmoda2_qwen2_5_vl_vision": ("mammoth_moda2", "Mammothmoda2Qwen2_5_VLVisionConfig"),
-}
-
-_omni_configs_registered = False
-
-
-def _register_configs_to_vllm_registry() -> None:
-    """Monkey-patch vLLM's _CONFIG_REGISTRY with omni custom config classes.
-
-    Inserts actual class objects so LazyConfigDict returns them directly.
-    """
-    global _omni_configs_registered
-    if _omni_configs_registered:
-        return
-    _omni_configs_registered = True
-
-    import importlib
-
-    # as we have only a few custom configs for now, register all of them
-    for model_type, (module_name, cls_name) in _OMNI_CONFIG_REGISTRY.items():
-        if model_type not in _CONFIG_REGISTRY:
-            module = importlib.import_module(f"vllm_omni.transformers_utils.configs.{module_name}")
-            _CONFIG_REGISTRY[model_type] = getattr(module, cls_name)
 
 
 class OmniModelArchConfigConvertor(ModelArchConfigConvertorBase):
@@ -252,10 +216,6 @@ class OmniModelConfig(ModelConfig):
         omni_cfg = object.__new__(cls)
         omni_cfg.__dict__.update(model_config.__dict__)
         omni_cfg.__dict__.update(omni_kwargs)
-
-        # Ensure custom HF configs are registered in vLLM's _CONFIG_REGISTRY
-        # before the parent __post_init__ calls get_config()
-        _register_configs_to_vllm_registry()
 
         # Apply any model specific patches or necessary overrides
         if (
