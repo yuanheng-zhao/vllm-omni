@@ -146,6 +146,23 @@ for chunk in response:
 print()
 ```
 
+Or using curl:
+
+```bash
+curl http://localhost:8091/v1/chat/completions \
+  -H "Content-Type: application/json" \
+  -d '{
+    "model": "Jonathan1909/Ming-flash-omni-2.0",
+    "messages": [
+      {"role": "system", "content": [{"type": "text", "text": "你是一个友好的AI助手。\n\ndetailed thinking off"}]},
+      {"role": "user", "content": "请详细介绍鹦鹉的生活习性。"}
+    ],
+    "modalities": ["text"],
+    "stream": true,
+  }'
+```
+
+
 ## Reasoning (Thinking Mode)
 
 To enable reasoning/thinking mode, change `detailed thinking off` to `detailed thinking on` in the system prompt:
