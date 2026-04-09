@@ -24,7 +24,10 @@ stage_args:
       dtype: "float32"
     default_sampling_params:
       max_tokens: 2048
-      stop_token_ids: [6562]  # speech EOS token
+      stop_token_ids: [6562]  # merged speech stop token (logsumexp of all 200 stop logits)
+      top_k: 25
+      top_p: 0.8
+      repetition_penalty: 1.0001  # near-identity; forces vLLM to track output_token_ids for RAS
 
   - stage_id: 1
     runtime:
