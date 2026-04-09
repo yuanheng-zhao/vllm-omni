@@ -466,7 +466,9 @@ def initialize_diffusion_stage(
     )
     if metadata.cfg_kv_collect_func is not None:
         od_config.cfg_kv_collect_func = metadata.cfg_kv_collect_func
-    return StageDiffusionClient(model, od_config, metadata, handshake_timeout=stage_init_timeout, batch_size=batch_size)
+    return StageDiffusionClient(
+        model, od_config, metadata, stage_init_timeout=stage_init_timeout, batch_size=batch_size
+    )
 
 
 def _shutdown_or_close_resource(resource: Any, resource_name: str, stage_id: int) -> None:
