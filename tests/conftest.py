@@ -1587,8 +1587,6 @@ def omni_server(request: pytest.FixtureRequest, run_level: str, model_prefix: st
             )
 
         server_args = params.server_args or []
-        if params.use_omni:
-            server_args = ["--stage-init-timeout", "120", *server_args]
         if stage_config_path is not None:
             server_args += ["--stage-configs-path", stage_config_path]
 
@@ -3056,7 +3054,7 @@ def omni_runner(request, model_prefix):
     with _omni_server_lock:
         model, stage_config_path = request.param
         model = model_prefix + model
-        with OmniRunner(model, seed=42, stage_configs_path=stage_config_path, stage_init_timeout=300) as runner:
+        with OmniRunner(model, seed=42, stage_configs_path=stage_config_path) as runner:
             print("OmniRunner started successfully")
             yield runner
             print("OmniRunner stopping...")
