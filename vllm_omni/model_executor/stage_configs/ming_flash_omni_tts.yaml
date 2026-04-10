@@ -11,7 +11,7 @@ stage_args:
       max_batch_size: 1
     engine_args:
       model_stage: talker
-      model_arch: MingFlashOmniForConditionalGeneration
+      model_arch: MingFlashOmniTalkerForConditionalGeneration
       worker_cls: vllm_omni.worker.gpu_generation_worker.GPUGenerationWorker
       scheduler_cls: vllm_omni.core.sched.omni_generation_scheduler.OmniGenerationScheduler
       gpu_memory_utilization: 0.8
@@ -19,8 +19,7 @@ stage_args:
       trust_remote_code: true
       engine_output_type: audio
       enable_prefix_caching: false
-      max_num_batched_tokens: 1000000
-      hf_config_name: talker_config
+      max_num_batched_tokens: 100000
       tokenizer_subdir: talker/llm
     final_output: true
     final_output_type: audio

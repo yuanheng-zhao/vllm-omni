@@ -24,7 +24,10 @@ def apply_rotary_pos_emb(t, freqs, scale=1.0):
     """
     rot_dim = freqs.shape[-1]
     t_left, t_right = t[..., :rot_dim], t[..., rot_dim:]
-    t_transformed = (t_left * freqs.cos() + rotate_half(t_left) * freqs.sin()) * scale
+    # Compute RoPE in float32 for precision, then cast back.
+    orig_dtype = t_left.dtype
+    t_left = t_left.float()
+    t_transformed = ((t_left * freqs.cos() + rotate_half(t_left) * freqs.sin()) * scale).to(orig_dtype)
     return torch.cat((t_transformed, t_right), dim=-1)
 
 
