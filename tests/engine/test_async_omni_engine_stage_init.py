@@ -88,7 +88,9 @@ def test_initialize_stages_restores_device_visibility_after_diffusion_init(monke
 
 
 def test_initialize_stages_passes_stage_init_timeout_to_diffusion_handshake(monkeypatch):
-    """Regression test: stage_init_timeout must reach complete_diffusion_handshake."""
+    """Regression test for stage_init_timeout passing to complete_diffusion_handshake
+    in the diffusion stage path.
+    """
     import vllm_omni.diffusion.data as diffusion_data_mod
     import vllm_omni.diffusion.stage_diffusion_client as client_mod
     import vllm_omni.engine.async_omni_engine as engine_mod
@@ -100,6 +102,7 @@ def test_initialize_stages_passes_stage_init_timeout_to_diffusion_handshake(monk
     engine.num_stages = 1
     engine.async_chunk = False
     engine.diffusion_batch_size = 1
+    engine.single_stage_mode = False
     engine.stage_configs = [types.SimpleNamespace(stage_id=0, stage_type="diffusion", engine_args={})]
 
     metadata = types.SimpleNamespace(
@@ -167,12 +170,16 @@ def test_initialize_stages_passes_stage_init_timeout_to_diffusion_handshake(monk
 
 
 def test_launch_llm_stage_passes_stage_init_timeout_to_complete_stage_handshake(monkeypatch):
-    """Regression test: stage_init_timeout must reach complete_stage_handshake in the LLM path."""
+    """Regression test for stage_init_timeout reaching complete_stage_handshake
+    in the LLM stage path.
+    """
     import vllm_omni.engine.async_omni_engine as engine_mod
     from vllm_omni.platforms import current_omni_platform
 
     engine = object.__new__(AsyncOmniEngine)
     engine.model = "dummy-model"
+    engine.single_stage_mode = False
+    engine._omni_master_server = None
 
     metadata = types.SimpleNamespace(stage_id=0, runtime_cfg={"devices": "0"})
     fake_vllm_config = types.SimpleNamespace()
