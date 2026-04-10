@@ -73,6 +73,7 @@ class OmniServerParams(NamedTuple):
     server_args: list[str] | None = None
     env_dict: dict[str, str] | None = None
     use_omni: bool = True
+    stage_init_timeout: int | None = None  # None defers to the server's own default (300 s)
 
 
 def assert_image_diffusion_response(
@@ -1587,6 +1588,8 @@ def omni_server(request: pytest.FixtureRequest, run_level: str, model_prefix: st
             )
 
         server_args = params.server_args or []
+        if params.use_omni and params.stage_init_timeout is not None:
+            server_args = ["--stage-init-timeout", str(params.stage_init_timeout), *server_args]
         if stage_config_path is not None:
             server_args += ["--stage-configs-path", stage_config_path]
 
