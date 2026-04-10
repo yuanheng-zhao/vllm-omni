@@ -8,8 +8,10 @@ import math
 import torch
 import torch.nn as nn
 
+# from .rope import RotaryEmbedding
+from x_transformers.x_transformers import RotaryEmbedding
+
 from .modules import DiTBlock, FinalLayer
-from .rope import RotaryEmbedding
 
 
 class SinusPositionEmbedding(nn.Module):

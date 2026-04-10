@@ -8,7 +8,8 @@ import torch
 import torch.nn.functional as F
 from torch import nn
 
-from .rope import apply_rotary_pos_emb
+# from .rope import apply_rotary_pos_emb
+from x_transformers.x_transformers import apply_rotary_pos_emb
 
 
 class RMSNorm(nn.Module):
