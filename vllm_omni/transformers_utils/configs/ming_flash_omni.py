@@ -274,7 +274,6 @@ class MingFlashOmniTalkerConfig(PretrainedConfig):
     """
 
     model_type = "ming_flash_omni_talker"
-    sub_configs: ClassVar = {"llm_config": AutoConfig}
 
     def __init__(
         self,

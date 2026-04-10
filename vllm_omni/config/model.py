@@ -5,7 +5,14 @@ from pydantic import ConfigDict, TypeAdapter
 from vllm.config import ModelConfig
 from vllm.config.utils import config
 from vllm.logger import init_logger
-from vllm.transformers_utils.config import _CONFIG_REGISTRY, get_hf_text_config
+from vllm.transformers_utils.config import (
+    _CONFIG_REGISTRY,
+    _uses_mrope,
+    get_hf_text_config,
+)
+from vllm.transformers_utils.config import (
+    uses_mrope as _upstream_uses_mrope,
+)
 from vllm.transformers_utils.model_arch_config_convertor import (
     ModelArchConfigConvertorBase,
 )
@@ -21,6 +28,7 @@ _OMNI_CONFIG_REGISTRY: dict[str, tuple[str, str]] = {
     "bailing_moe_v2": ("ming_flash_omni", "BailingMoeV2Config"),
     "bailingmm_moe_v2_lite": ("ming_flash_omni", "BailingMM2Config"),
     "ming_flash_omni_thinker": ("ming_flash_omni", "MingFlashOmniThinkerConfig"),
+    "ming_flash_omni_talker": ("ming_flash_omni", "MingFlashOmniTalkerConfig"),
     "ming_flash_omni": ("ming_flash_omni", "MingFlashOmniConfig"),
     # mammoth_moda2 configs
     "mammothmoda2": ("mammoth_moda2", "Mammothmoda2Config"),
@@ -158,6 +166,17 @@ class OmniModelConfig(ModelConfig):
         if self.model_arch is not None:
             return [self.model_arch]
         return super().architectures
+
+    @property
+    def uses_mrope(self) -> bool:
+        if self.hf_config_name is not None:
+            stage_config = getattr(self.hf_config, self.hf_config_name, None)
+            if stage_config is not None:
+                return _upstream_uses_mrope(stage_config)
+            return _uses_mrope(self.hf_config)
+        if self.model_stage != "thinker":
+            return _uses_mrope(self.hf_config)
+        return super().uses_mrope
 
     @property
     def embedding_size(self):

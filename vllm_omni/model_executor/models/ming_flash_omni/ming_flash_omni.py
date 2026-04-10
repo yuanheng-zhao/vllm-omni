@@ -16,7 +16,12 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-"""Ming-flash-omni-2.0 unified model (thinker + imagegen + talker)."""
+"""Ming-flash-omni-2.0 unified model (thinker + talker + imagegen).
+
+For multi-stage deployment, both thinker and talker stages use this unified
+wrapper with model_stage='thinker' or 'talker'.  For standalone TTS, use
+MingFlashOmniTalkerForConditionalGeneration directly.
+"""
 
 from collections.abc import Iterable
 
@@ -42,7 +47,6 @@ from vllm_omni.model_executor.models.output_templates import OmniOutput
 from vllm_omni.model_executor.models.utils import add_prefix_to_loaded_weights
 from vllm_omni.transformers_utils.configs.ming_flash_omni import (
     MingFlashOmniConfig,
-    MingFlashOmniTalkerConfig,
     MingFlashOmniThinkerConfig,
 )
 
@@ -67,7 +71,12 @@ class MingFlashOmniForConditionalGeneration(
     SupportsMRoPE,
     CustomProcessMixin,
 ):
-    """Unified Ming-flash-omni-2.0 model combining thinker, imagegen, and talker."""
+    """Unified Ming-flash-omni-2.0 model (thinker + talker + future imagegen).
+
+    For multi-stage deployment, both thinker and talker stages use this class
+    with model_stage='thinker' or 'talker'.  For standalone TTS, use
+    MingFlashOmniTalkerForConditionalGeneration directly.
+    """
 
     supports_multimodal = True
     requires_raw_input_tokens: bool = True
@@ -79,19 +88,15 @@ class MingFlashOmniForConditionalGeneration(
         self.has_postprocess = False
 
         config = vllm_config.model_config.hf_config
-
-        self.vllm_config = vllm_config
         self.config = config
-
-        if isinstance(config, MingFlashOmniConfig):
-            thinker_config: MingFlashOmniThinkerConfig = config.thinker_config
-        else:
-            thinker_config = config  # BailingMM2Config is the thinker config
-        self.thinker_config = thinker_config
-
         self.model_stage = vllm_config.model_config.model_stage
 
         if self.model_stage == "thinker":
+            if isinstance(config, MingFlashOmniConfig):
+                thinker_config: MingFlashOmniThinkerConfig = config.thinker_config
+            else:
+                thinker_config = config  # BailingMM2Config is the thinker config
+
             thinker_vllm_config = vllm_config.with_hf_config(
                 thinker_config, architectures=["MingFlashOmniThinkerForConditionalGeneration"]
             )
@@ -101,8 +106,22 @@ class MingFlashOmniForConditionalGeneration(
                 architectures=["MingFlashOmniThinkerForConditionalGeneration"],
             )
             self.model = self.thinker
-            self.imagegen = None
-            self.talker = None
+            self.make_empty_intermediate_tensors = self.thinker.make_empty_intermediate_tensors
+
+        elif self.model_stage == "talker":
+            # The talker sub-model is self-contained: it resolves its own
+            # MingFlashOmniTalkerConfig from talker/config.json and handles
+            # its own safetensors loading.
+            self.talker = init_vllm_registered_model(
+                vllm_config=vllm_config,
+                prefix=maybe_prefix(prefix, "talker"),
+                architectures=["MingFlashOmniTalkerForConditionalGeneration"],
+            )
+            self.model = self.talker
+            self.make_empty_intermediate_tensors = self.talker.make_empty_intermediate_tensors
+            # Propagate weight loading attributes from the talker sub-model.
+            self.allow_patterns_overrides = self.talker.allow_patterns_overrides
+            self.fall_back_to_pt_during_load = self.talker.fall_back_to_pt_during_load
 
         elif self.model_stage == "imagegen":
             # TODO: Implement image generator stage
@@ -110,41 +129,10 @@ class MingFlashOmniForConditionalGeneration(
                 "Image generation stage is not yet implemented. Please use model_stage='thinker' for now."
             )
 
-        elif self.model_stage == "talker":
-            if isinstance(config, MingFlashOmniConfig):
-                talker_config = config.talker_config
-            elif isinstance(config, MingFlashOmniTalkerConfig):
-                talker_config = config
-            else:
-                talker_config = config
-
-            if talker_config is None:
-                raise ValueError("talker_config is required for model_stage='talker'")
-
-            talker_vllm_config = vllm_config.with_hf_config(
-                talker_config, architectures=["MingFlashOmniTalkerForConditionalGeneration"]
-            )
-            self.talker = init_vllm_registered_model(
-                vllm_config=talker_vllm_config,
-                prefix=maybe_prefix(prefix, "talker"),
-                architectures=["MingFlashOmniTalkerForConditionalGeneration"],
-            )
-            self.model = self.talker
-            self.thinker = None
-            self.imagegen = None
-
         else:
             raise ValueError(
-                f"Invalid model_stage: {self.model_stage}. Must be one of: 'thinker', 'imagegen', 'talker'"
+                f"Invalid model_stage: {self.model_stage}. Must be one of: 'thinker', 'talker', 'imagegen'."
             )
-
-        # Set up intermediate tensors
-        if self.model_stage == "thinker":
-            self.make_empty_intermediate_tensors = self.thinker.make_empty_intermediate_tensors
-        elif self.model_stage == "talker":
-            self.make_empty_intermediate_tensors = self.talker.make_empty_intermediate_tensors
-        else:
-            self.make_empty_intermediate_tensors = lambda: None
 
     def forward(
         self,
@@ -178,7 +166,7 @@ class MingFlashOmniForConditionalGeneration(
     ):
         if hasattr(self.model, "sample"):
             return self.model.sample(logits, sampling_metadata)
-        raise NotImplementedError("sample method not available on current stage")
+        return None
 
     def get_mrope_input_positions(self, *args, **kwargs):
         if hasattr(self.model, "get_mrope_input_positions"):
@@ -186,51 +174,20 @@ class MingFlashOmniForConditionalGeneration(
         raise NotImplementedError("get_mrope_input_positions not available on current stage")
 
     def load_weights(self, weights: Iterable[tuple[str, torch.Tensor]]) -> set[str]:
-        loaded_weights = set()
-        thinker_weights = []
-        imagegen_weights = []
-        talker_weights = []
+        if self.model_stage == "thinker":
+            # Strip optional "thinker." prefix so the sub-model sees bare keys.
+            stripped = ((name.removeprefix("thinker."), value) for name, value in weights)
+            thinker_loaded = self.thinker.load_weights(stripped)
+            return add_prefix_to_loaded_weights(thinker_loaded, "thinker")
 
-        for name, value in weights:
-            if name.startswith("thinker."):
-                thinker_weights.append((name, value))
-            elif name.startswith("imagegen."):
-                imagegen_weights.append((name, value))
-            elif name.startswith("talker."):
-                talker_weights.append((name, value))
-            else:
-                # Weights without prefix:
-                # - For thinker stage: route to thinker (legacy layout)
-                # - For talker stage: route to talker (HF repo layout where
-                #   talker/model.safetensors contains unprefixed weights like
-                #   "model.*", "cfm.*", "aggregator.*", etc.)
-                if self.model_stage == "talker":
-                    talker_weights.append((name, value))
-                else:
-                    thinker_weights.append((name, value))
+        elif self.model_stage == "talker":
+            # The talker's load_weights is self-contained: when standalone
+            # it reads talker/model*.safetensors directly via
+            # _iter_talker_safetensors(), bypassing the incoming generator.
+            talker_loaded = self.talker.load_weights(weights)
+            return add_prefix_to_loaded_weights(talker_loaded, "talker")
 
-        if self.model_stage == "thinker" and thinker_weights:
-            # Remove "thinker." prefix before loading
-            thinker_weights_stripped = [
-                (name.replace("thinker.", "", 1) if name.startswith("thinker.") else name, value)
-                for name, value in thinker_weights
-            ]
-            thinker_loaded = self.thinker.load_weights(thinker_weights_stripped)
-            thinker_loaded = add_prefix_to_loaded_weights(thinker_loaded, "thinker")
-            loaded_weights.update(thinker_loaded)
-
-        if self.model_stage == "talker" and talker_weights:
-            talker_weights_stripped = [
-                (name.replace("talker.", "", 1) if name.startswith("talker.") else name, value)
-                for name, value in talker_weights
-            ]
-            talker_loaded = self.talker.load_weights(talker_weights_stripped)
-            talker_loaded = add_prefix_to_loaded_weights(talker_loaded, "talker")
-            loaded_weights.update(talker_loaded)
-
-        # TODO: Load imagegen weights when implemented
-
-        return loaded_weights
+        return set()
 
     def get_mm_mapping(self) -> MultiModelKeys:
         return MultiModelKeys.from_string_field(
@@ -241,9 +198,7 @@ class MingFlashOmniForConditionalGeneration(
 
     @property
     def sampler(self):
-        if hasattr(self.model, "sampler"):
-            return self.model.sampler
-        return None
+        return getattr(self.model, "sampler", None)
 
     def embed_input_ids(
         self,
