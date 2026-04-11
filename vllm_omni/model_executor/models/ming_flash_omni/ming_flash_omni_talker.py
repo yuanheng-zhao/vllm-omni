@@ -729,8 +729,12 @@ class MingFlashOmniTalkerForConditionalGeneration(nn.Module, CustomProcessMixin)
         # (LLM + CFM), not standard token sampling.
         return None
 
-    def embed_input_ids(self, input_ids: torch.Tensor) -> torch.Tensor:
-        # return self.model.embed_tokens(input_ids)
+    def embed_input_ids(
+        self,
+        input_ids: torch.Tensor,
+        multimodal_embeddings=None,
+        is_multimodal=None,
+    ) -> torch.Tensor:
         return self.model.get_input_embeddings()(input_ids)
 
     def forward(

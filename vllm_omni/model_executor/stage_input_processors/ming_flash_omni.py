@@ -9,6 +9,9 @@ from typing import Any
 from vllm.inputs import TextPrompt
 
 from vllm_omni.inputs.data import OmniTokensPrompt
+from vllm_omni.model_executor.models.ming_flash_omni.prompt_utils import (
+    create_instruction as ming_create_instruction,
+)
 
 
 def _validate_stage_inputs(stage_list, engine_input_source):
@@ -57,18 +60,36 @@ def thinker2talker(
         if original_prompt is not None and hasattr(original_prompt, "additional_information"):
             additional_info = original_prompt.additional_information or {}
 
+        # Normalise instruction
+        instruction = additional_info.get("instruction", None)
+        if isinstance(instruction, str) and instruction and not instruction.lstrip().startswith("{"):
+            instruction = ming_create_instruction({"风格": instruction})
+
+        # spk_emb can arrive serialised as a plain list from JSON requests;
+        # the talker's spk_head wants a torch tensor.
+        spk_emb = additional_info.get("spk_emb", None)
+        if isinstance(spk_emb, list) and spk_emb and not hasattr(spk_emb[0], "device"):
+            import torch
+
+            spk_emb = torch.tensor(spk_emb, dtype=torch.float32).unsqueeze(0)
+
+        max_decode_steps = int(additional_info.get("max_decode_steps", additional_info.get("max_steps", 200)))
+
         # Build talker input with the generated text
         talker_info = {
             "text": generated_text,
             "prompt": additional_info.get("prompt", "Please generate speech based on the following description.\n"),
-            "spk_emb": additional_info.get("spk_emb", None),
-            "use_zero_spk_emb": additional_info.get("use_zero_spk_emb", False),
-            "instruction": additional_info.get("instruction", None),
+            "spk_emb": spk_emb,
+            # Default to zero speaker embedding for the happy-path chat flow
+            # where the caller hasn't supplied a voice — matches the TTS
+            # /v1/audio/speech behaviour.
+            "use_zero_spk_emb": additional_info.get("use_zero_spk_emb", spk_emb is None),
+            "instruction": instruction,
             "prompt_text": additional_info.get("prompt_text", None),
             "prompt_wav_lat": additional_info.get("prompt_wav_lat", None),
             "prompt_wav_emb": additional_info.get("prompt_wav_emb", None),
-            "max_steps": additional_info.get("max_steps", additional_info.get("max_decode_steps", 20)),
-            "max_decode_steps": additional_info.get("max_decode_steps", None),
+            "max_steps": max_decode_steps,
+            "max_decode_steps": max_decode_steps,
             "max_text_length": additional_info.get("max_text_length", 50),
             "cfg": additional_info.get("cfg", 2.0),
             "sigma": additional_info.get("sigma", 0.25),
