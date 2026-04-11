@@ -15,6 +15,8 @@ def run_tts(args) -> None:
         "input": args.text,
         "response_format": args.response_format,
     }
+    if args.instructions:
+        payload["instructions"] = args.instructions
 
     print(f"Model: {args.model}")
     print(f"Text: {args.text}")
@@ -53,6 +55,11 @@ def main():
         help="Audio format (default: wav)",
     )
     parser.add_argument("--output", "-o", default=None, help="Output file path")
+    parser.add_argument(
+        "--instructions",
+        default=None,
+        help="Free-form style description (mapped to caption 风格 on the server).",
+    )
     args = parser.parse_args()
     run_tts(args)
 

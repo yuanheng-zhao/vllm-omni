@@ -38,6 +38,12 @@ from vllm_omni.model_executor.models.fish_speech.prompt_utils import (
     estimate_fish_voice_clone_prompt_len_from_normalized,
     normalize_fish_voice_clone_texts,
 )
+from vllm_omni.model_executor.models.ming_flash_omni.prompt_utils import (
+    DEFAULT_PROMPT as MING_DEFAULT_PROMPT,
+)
+from vllm_omni.model_executor.models.ming_flash_omni.prompt_utils import (
+    create_instruction as ming_create_instruction,
+)
 from vllm_omni.outputs import OmniRequestOutput
 
 logger = init_logger(__name__)
@@ -48,12 +54,14 @@ _QWEN3_TTS_MODEL_STAGES = {"qwen3_tts"}
 _FISH_TTS_MODEL_STAGES = {"fish_speech_slow_ar"}
 _COSYVOICE3_TTS_MODEL_STAGES = {"cosyvoice3_talker"}
 _OMNIVOICE_TTS_MODEL_STAGES = {"omnivoice_generator"}
+_MING_TTS_MODEL_STAGES = {"ming_tts"}
 _TTS_MODEL_STAGES: set[str] = (
     _VOXTRAL_TTS_MODEL_STAGES
     | _QWEN3_TTS_MODEL_STAGES
     | _FISH_TTS_MODEL_STAGES
     | _COSYVOICE3_TTS_MODEL_STAGES
     | _OMNIVOICE_TTS_MODEL_STAGES
+    | _MING_TTS_MODEL_STAGES
 )
 _TTS_LANGUAGES: set[str] = {
     "Auto",
@@ -274,6 +282,8 @@ class OmniOpenAIServingSpeech(OpenAIServing, AudioMixin):
             return "cosyvoice3"
         if model_stage in _OMNIVOICE_TTS_MODEL_STAGES:
             return "omnivoice"
+        if model_stage in _MING_TTS_MODEL_STAGES:
+            return "ming_flash_omni_tts"
         return None
 
     def _compute_max_instructions_length(self) -> int:
@@ -297,6 +307,11 @@ class OmniOpenAIServingSpeech(OpenAIServing, AudioMixin):
 
     def _load_supported_speakers(self) -> set[str]:
         """Load supported speakers (case-insensitive) from the model configuration."""
+        if self._tts_model_type == "ming_flash_omni_tts":
+            # Ming-flash-omni drives speaker selection via the caption JSON
+            # (audio_sequence[0]["说话人"]) rather than a spk_id table, so there
+            # is no static speaker list to surface here.
+            return set()
         try:
             if self._tts_model_type == "voxtral_tts":
                 config = self.engine_client.model_config.hf_config.audio_config
@@ -729,7 +744,17 @@ class OmniOpenAIServingSpeech(OpenAIServing, AudioMixin):
             return self._validate_fish_tts_request(request)
         if self._tts_model_type == "cosyvoice3":
             return self._validate_cosyvoice3_request(request)
+        if self._tts_model_type == "ming_flash_omni_tts":
+            return self._validate_ming_tts_request(request)
         return self._validate_qwen_tts_request(request)
+
+    def _validate_ming_tts_request(self, request: OpenAICreateSpeechRequest) -> str | None:
+        """Validate Ming-flash-omni standalone-talker request parameters."""
+        if not request.input or not request.input.strip():
+            return "Input text cannot be empty"
+        if request.instructions is not None and len(request.instructions) > self._max_instructions_length:
+            return f"instructions exceeds max length {self._max_instructions_length}"
+        return None
 
     def _validate_ref_audio_format(self, ref_audio: str) -> str | None:
         """Validate ref_audio is a supported URI format. Returns error or None."""
@@ -1261,6 +1286,28 @@ class OmniOpenAIServingSpeech(OpenAIServing, AudioMixin):
             },
         }
 
+    # ---- Ming-flash-omni standalone-talker (TTS) helpers ----
+
+    def _build_ming_prompt(self, request: OpenAICreateSpeechRequest) -> dict[str, Any]:
+        caption_fields: dict[str, Any] = {}
+        if request.instructions:
+            caption_fields["风格"] = request.instructions
+
+        additional_information = {
+            "prompt": MING_DEFAULT_PROMPT,
+            "text": request.input,
+            "instruction": ming_create_instruction(caption_fields),
+            "use_zero_spk_emb": True,
+            "max_decode_steps": 200,
+            "cfg": 2.0,
+            "sigma": 0.25,
+            "temperature": 0.0,
+        }
+        return {
+            "prompt_token_ids": [0],
+            "additional_information": additional_information,
+        }
+
     # ---- Common speech generation helpers ----
 
     async def _prepare_speech_generation(
@@ -1294,6 +1341,9 @@ class OmniOpenAIServingSpeech(OpenAIServing, AudioMixin):
             elif self._tts_model_type == "cosyvoice3":
                 prompt = await self._build_cosyvoice3_prompt(request)
                 tts_params = {}
+            elif self._tts_model_type == "ming_flash_omni_tts":
+                prompt = self._build_ming_prompt(request)
+                tts_params = {}
             else:
                 tts_params = self._build_tts_params(request)
                 # Resolve ref_audio (explicit or auto-set for uploaded voices)
@@ -1319,6 +1369,8 @@ class OmniOpenAIServingSpeech(OpenAIServing, AudioMixin):
             model_type = "voxtral_tts"
         elif self._tts_model_type == "cosyvoice3":
             model_type = "cosyvoice3"
+        elif self._tts_model_type == "ming_flash_omni_tts":
+            model_type = "ming_flash_omni_tts"
         elif self._is_tts:
             model_type = tts_params.get("task_type", ["unknown"])[0]
         else:

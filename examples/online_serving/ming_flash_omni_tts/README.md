@@ -47,7 +47,24 @@ curl -X POST http://localhost:8091/v1/audio/speech \
     }' --output ming_online.wav
 ```
 
+### Style control
+
+The OpenAI `instructions` field is forwarded to the talker as the
+`风格` (style) entry of the caption JSON — the same slot used by the
+offline `style` case. For example:
+
+```bash
+python examples/online_serving/ming_flash_omni_tts/speech_client.py \
+    --text "我会一直在这里陪着你，直到你慢慢、慢慢地沉入那个最温柔的梦里……好吗？" \
+    --instructions "这是一种ASMR耳语，属于一种旨在引发特殊感官体验的创意风格。这个女性使用轻柔的普通话进行耳语，声音气音成分重。音量极低，紧贴麦克风，语速极慢，旨在制造触发听者颅内快感的声学刺激。" \
+    --output ming_online_asmr.wav
+```
+
 ## Notes
 
 - This is the **online serving** counterpart of `examples/offline_inference/ming_flash_omni_tts/`.
-- For cookbook-style fine-grained talker controls (`instruction`, `max_decode_steps`, `cfg`, `sigma`, etc.), use the offline e2e example where `additional_information` is set explicitly.
+- The server uses `use_zero_spk_emb=True` and the default decode args
+  (`max_decode_steps=200`, `cfg=2.0`, `sigma=0.25`, `temperature=0.0`).
+  For other caption fields (`语速`, `基频`, `IP`, BGM, etc.) or overriding
+  decode args, use the offline e2e example where `additional_information`
+  is set explicitly.
