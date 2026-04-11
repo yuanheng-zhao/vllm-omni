@@ -1,7 +1,5 @@
 """Offline e2e example for Ming-flash-omni-2.0 standalone talker (TTS)."""
 
-import copy
-import json
 import os
 from typing import Any
 
@@ -13,43 +11,13 @@ os.environ["VLLM_WORKER_MULTIPROC_METHOD"] = "spawn"
 
 from vllm_omni.entrypoints.omni import Omni
 from vllm_omni.inputs.data import OmniTokensPrompt
+from vllm_omni.model_executor.models.ming_flash_omni.prompt_utils import (
+    DEFAULT_PROMPT,
+    create_instruction,
+)
 
 MODEL_NAME = "Jonathan1909/Ming-flash-omni-2.0"
 DEFAULT_STAGE_CONFIG = "vllm_omni/model_executor/stage_configs/ming_flash_omni_tts.yaml"
-DEFAULT_PROMPT = "Please generate speech based on the following description.\n"
-
-BASE_CAPTION_TEMPLATE = {
-    "audio_sequence": [
-        {
-            "序号": 1,
-            "说话人": "speaker_1",
-            "方言": None,
-            "风格": None,
-            "语速": None,
-            "基频": None,
-            "音量": None,
-            "情感": None,
-            "BGM": {
-                "Genre": None,
-                "Mood": None,
-                "Instrument": None,
-                "Theme": None,
-                "ENV": None,
-                "SNR": None,
-            },
-            "IP": None,
-        }
-    ]
-}
-
-
-def create_instruction(user_input: dict[str, Any]) -> str:
-    caption = copy.deepcopy(BASE_CAPTION_TEMPLATE)
-    item = caption["audio_sequence"][0]
-    for key, value in user_input.items():
-        if key in item:
-            item[key] = value
-    return json.dumps(caption, ensure_ascii=False)
 
 
 def get_messages(case: str, text_override: str | None) -> dict[str, Any]:
