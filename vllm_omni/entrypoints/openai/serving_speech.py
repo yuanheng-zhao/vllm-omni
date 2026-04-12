@@ -1508,12 +1508,14 @@ class OmniOpenAIServingSpeech(OpenAIServing, AudioMixin):
         if request.instructions:
             caption_fields["风格"] = request.instructions
 
-        # TTS path applies ming task type `instruct`
+        # TTS path applies ming task type `instruct`.
+        # voice_name enables talker-side voice preset resolution (e.g. "DB30").
         additional_information = {
             "ming_task": "instruct",
             "prompt": MING_DEFAULT_PROMPT,
             "text": request.input,
             "instruction": ming_create_instruction(caption_fields),
+            "voice_name": request.voice if request.voice else None,
             "use_zero_spk_emb": True,
             "max_decode_steps": 200,
             "cfg": 2.0,

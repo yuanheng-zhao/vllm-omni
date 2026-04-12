@@ -14,6 +14,7 @@
 from __future__ import annotations
 
 import glob as glob_module
+import json
 import os
 from collections.abc import Iterable
 
@@ -112,6 +113,10 @@ class MingFlashOmniTalkerForConditionalGeneration(nn.Module, CustomProcessMixin)
         # CFM Graph executor (initialized lazily on first forward)
         self._sampler_pool: CFMGraphExecutorPool | None = None
         self._use_cuda_graphs = not vllm_config.model_config.enforce_eager
+
+        # Voice preset cache: voice_name → {prompt_wav_lat, prompt_wav_emb, spk_emb}
+        self.registered_prompts: dict[str, dict[str, torch.Tensor]] = {}
+        self._spkemb_extractor = None
 
     @staticmethod
     def _resolve_talker_config(
@@ -278,6 +283,164 @@ class MingFlashOmniTalkerForConditionalGeneration(nn.Module, CustomProcessMixin)
             else:
                 self._sampler_pool = None
         return self._sampler_pool
+
+    def _get_spkemb_extractor(self):
+        """Lazily initialize the CAMPPlus speaker embedding extractor."""
+        if self._spkemb_extractor is None:
+            from .spk_embedding import SpkembExtractor
+
+            campplus_path = None
+            for candidate in (self._talker_dir, self._model_path):
+                path = os.path.join(candidate, "campplus.onnx")
+                if os.path.isfile(path):
+                    campplus_path = path
+                    break
+            if campplus_path is None:
+                try:
+                    campplus_path = cached_file(self._model_path, "campplus.onnx", subfolder="talker")
+                except Exception:
+                    pass
+            if campplus_path is None:
+                raise RuntimeError("campplus.onnx not found. Expected at <model_path>/talker/campplus.onnx")
+            self._spkemb_extractor = SpkembExtractor(campplus_path)
+            logger.info("Initialized SpkembExtractor from %s", campplus_path)
+        return self._spkemb_extractor
+
+    @torch.no_grad()
+    def register_prompt_wav(self, voice_name: str, prompt_wav_path: str | list[str]) -> None:
+        """Register a voice preset from reference wav file(s).
+
+        Extracts and caches spk_emb, prompt_wav_lat, and prompt_wav_emb
+        for reuse across requests.
+        """
+        import torchaudio
+
+        if isinstance(prompt_wav_path, str):
+            prompt_wav_path = [prompt_wav_path]
+
+        extractor = self._get_spkemb_extractor()
+        vae_sr = int(self.audio_vae.config.sample_rate) if self.audio_vae else 44100
+
+        speech_chunks = []
+        spk_emb_list = []
+        for wav_path in prompt_wav_path:
+            speech_tmp, sample_rate = torchaudio.load(wav_path, backend="soundfile")
+            speech_for_vae = speech_tmp.clone()
+            if sample_rate != vae_sr:
+                speech_for_vae = torchaudio.transforms.Resample(sample_rate, vae_sr)(speech_for_vae)
+            speech_chunks.append(speech_for_vae)
+
+            speech_for_spk = speech_tmp.clone()
+            if sample_rate != 16000:
+                speech_for_spk = torchaudio.transforms.Resample(sample_rate, 16000)(speech_for_spk)
+            raw_emb = extractor(speech_for_spk)
+            se = self.spk_head(raw_emb.to(device=self.device, dtype=self.dtype))
+            spk_emb_list.append(se)
+
+        speech = torch.cat(speech_chunks, dim=-1)
+
+        if self.audio_vae is not None:
+            patch_pt = self.audio_vae.encoder.hop_size * max(1, self.audio_vae.encoder.patch_size) * self.patch_size
+            if speech.shape[-1] % patch_pt != 0:
+                pad_len = (speech.shape[-1] + patch_pt - 1) // patch_pt * patch_pt
+                pad_speech = torch.zeros((speech.shape[0], pad_len), dtype=speech.dtype, device=speech.device)
+                pad_speech[:, -speech.shape[-1] :] = speech
+                speech = pad_speech
+
+            prompt_wav_lat, _ = self.audio_vae.encode_latent(
+                speech.to(dtype=torch.bfloat16, device=self.device),
+                torch.tensor([speech.size(1)], dtype=torch.long, device=self.device),
+            )
+            assert prompt_wav_lat.shape[1] % self.patch_size == 0
+            prompt_wav_lat = prompt_wav_lat.reshape(-1, self.patch_size, prompt_wav_lat.shape[-1])
+            prompt_wav_emb = self.aggregator(prompt_wav_lat)
+            prompt_wav_lat = prompt_wav_lat.reshape(1, -1, prompt_wav_lat.shape[-1])
+            prompt_wav_emb = prompt_wav_emb.reshape(1, -1, prompt_wav_emb.shape[-1])
+        else:
+            prompt_wav_lat = None
+            prompt_wav_emb = None
+
+        self.registered_prompts[voice_name] = {
+            "prompt_wav_lat": prompt_wav_lat,
+            "prompt_wav_emb": prompt_wav_emb,
+            "spk_emb": spk_emb_list,
+        }
+        logger.info("Registered voice preset '%s' from %s", voice_name, prompt_wav_path)
+
+    def get_prompt_emb(
+        self,
+        voice_name: str | None,
+        use_spk_emb: bool = False,
+        use_zero_spk_emb: bool = False,
+    ) -> tuple[torch.Tensor | None, torch.Tensor | None, list[torch.Tensor] | None]:
+        """Look up a registered voice preset.
+
+        Returns (prompt_wav_lat, prompt_wav_emb, spk_emb).
+        """
+        if voice_name is None or voice_name not in self.registered_prompts:
+            if not use_zero_spk_emb:
+                return None, None, None
+            return None, None, [torch.zeros(1, self.hidden_size, device=self.device, dtype=self.dtype)]
+        preset = self.registered_prompts[voice_name]
+        spk_emb = preset["spk_emb"] if use_spk_emb else None
+        return preset["prompt_wav_lat"], preset["prompt_wav_emb"], spk_emb
+
+    def _load_voice_presets(self) -> None:
+        """Load voice_name.json and register all voice presets.
+
+        Searches local talker dir first, then downloads voice preset
+        files (voice_name.json + voices/**) from HF hub if needed.
+        """
+        voice_json_path = None
+        base_dir = None
+
+        # Try local paths first
+        for candidate in (self._talker_dir, self._model_path):
+            path = os.path.join(candidate, "voice_name.json")
+            if os.path.isfile(path):
+                voice_json_path = path
+                base_dir = os.path.dirname(voice_json_path)
+                break
+
+        # HF hub fallback: download voice_name.json + all voice wav files
+        if voice_json_path is None and not os.path.isdir(self._model_path):
+            try:
+                hf_root = download_weights_from_hf_specific(
+                    self._model_path,
+                    self.vllm_config.load_config.download_dir,
+                    allow_patterns=["talker/voice_name.json", "talker/data/**"],
+                    require_all=True,
+                )
+                candidate = os.path.join(hf_root, "talker", "voice_name.json")
+                if os.path.isfile(candidate):
+                    voice_json_path = candidate
+                    base_dir = os.path.join(hf_root, "talker")
+            except Exception as e:
+                logger.info("Could not download voice presets from HF: %s", e)
+
+        if voice_json_path is None:
+            logger.info("No voice_name.json found; voice presets unavailable")
+            return
+
+        with open(voice_json_path) as f:
+            voice_dict = json.load(f)
+
+        for name, info in voice_dict.items():
+            wav_path = info.get("prompt_wav_path", "")
+            prompt_text = info.get("prompt_text", "")
+            if not wav_path:
+                logger.warning("Voice preset '%s' has no prompt_wav_path, skipping", name)
+                continue
+            if not os.path.isabs(wav_path):
+                wav_path = os.path.join(base_dir, wav_path)
+            if not os.path.isfile(wav_path):
+                logger.warning("Voice preset '%s': wav not found at %s, skipping", name, wav_path)
+                continue
+            try:
+                self.register_prompt_wav(name, wav_path)
+                self.registered_prompts[name]["prompt_text"] = prompt_text
+            except Exception as e:
+                logger.warning("Failed to register voice preset '%s': %s", name, e)
 
     def _cfm_sample_step(self, last_hidden_state, his_lat, cfg=None, sigma=0.25, temperature=0.0):
         if cfg is None:
@@ -744,10 +907,22 @@ class MingFlashOmniTalkerForConditionalGeneration(nn.Module, CustomProcessMixin)
         prompt_wav_lat = additional_info.get("prompt_wav_lat", None)
         prompt_wav_emb = additional_info.get("prompt_wav_emb", None)
 
+        # Resolve voice preset
+        voice_name = additional_info.get("voice_name", None)
+        spk_emb_already_projected = False
+        if voice_name and voice_name in self.registered_prompts and spk_emb is None:
+            preset = self.registered_prompts[voice_name]
+            prompt_wav_lat = preset["prompt_wav_lat"]
+            prompt_wav_emb = preset["prompt_wav_emb"]
+            spk_emb = preset["spk_emb"]
+            spk_emb_already_projected = True
+            if prompt_text is None:
+                prompt_text = preset.get("prompt_text")
+
         if ming_task == "omni":
             prompt = MING_DEFAULT_PROMPT
             instruction = None
-            use_zero_spk_emb = False
+            use_zero_spk_emb = spk_emb is None
             cfg = 2.0
             sigma = 0.25
             temperature = 0.0
@@ -766,9 +941,13 @@ class MingFlashOmniTalkerForConditionalGeneration(nn.Module, CustomProcessMixin)
 
         if inputs_embeds is None:
             # Process speaker embedding through spk_head once and reuse across fragments.
+            # Preset-resolved embeddings are already projected; raw CAMPPlus
+            # embeddings (192-dim) from the request need spk_head projection.
             processed_spk_emb = None
             if spk_emb is not None:
-                if isinstance(spk_emb, list):
+                if spk_emb_already_projected:
+                    processed_spk_emb = spk_emb if isinstance(spk_emb, list) else [spk_emb]
+                elif isinstance(spk_emb, list):
                     processed_spk_emb = [self.spk_head(se.to(device=self.device, dtype=self.dtype)) for se in spk_emb]
                 else:
                     processed_spk_emb = [self.spk_head(spk_emb.to(device=self.device, dtype=self.dtype))]
@@ -897,6 +1076,12 @@ class MingFlashOmniTalkerForConditionalGeneration(nn.Module, CustomProcessMixin)
         # Load AudioVAE weights from separate safetensors file
         if self.audio_vae is not None and self._vae_weight_source is not None:
             loaded.update(self._load_vae_weights())
+
+        # Register voice presets after all weights (including VAE) are loaded
+        try:
+            self._load_voice_presets()
+        except Exception as e:
+            logger.warning("Voice preset loading failed (non-fatal): %s", e)
 
         return loaded
 

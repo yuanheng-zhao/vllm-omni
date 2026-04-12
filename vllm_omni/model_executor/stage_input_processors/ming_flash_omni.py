@@ -78,8 +78,8 @@ def thinker2talker(
         # The bridge only plumbs the request-specific fields; the
         # talker `forward()` enforces the per-task defaults from
         # `ming_task="omni"` so any stray caller overrides are ignored.
-        # TODO: the voice preset table (`data/voice_name.json`) is not
-        # yet ported
+        # Voice presets are resolved by voice_name in the talker's
+        # forward() from its registered_prompts cache.
         talker_info = {
             "ming_task": "omni",
             "text": generated_text,
