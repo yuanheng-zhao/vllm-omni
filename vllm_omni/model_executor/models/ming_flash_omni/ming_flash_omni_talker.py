@@ -396,7 +396,7 @@ class MingFlashOmniTalkerForConditionalGeneration(nn.Module, CustomProcessMixin)
 
         # Try local paths first
         for candidate in (self._talker_dir, self._model_path):
-            path = os.path.join(candidate, "voice_name.json")
+            path = os.path.join(candidate, "data", "voice_name.json")
             if os.path.isfile(path):
                 voice_json_path = path
                 base_dir = os.path.dirname(voice_json_path)
@@ -408,10 +408,10 @@ class MingFlashOmniTalkerForConditionalGeneration(nn.Module, CustomProcessMixin)
                 hf_root = download_weights_from_hf_specific(
                     self._model_path,
                     self.vllm_config.load_config.download_dir,
-                    allow_patterns=["talker/voice_name.json", "talker/data/**"],
+                    allow_patterns=["talker/data/**"],
                     require_all=True,
                 )
-                candidate = os.path.join(hf_root, "talker", "voice_name.json")
+                candidate = os.path.join(hf_root, "talker", "data", "voice_name.json")
                 if os.path.isfile(candidate):
                     voice_json_path = candidate
                     base_dir = os.path.join(hf_root, "talker")
