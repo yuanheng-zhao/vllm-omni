@@ -15,7 +15,6 @@ from __future__ import annotations
 
 import glob as glob_module
 import os
-import re
 from collections.abc import Iterable
 
 import torch
@@ -307,47 +306,16 @@ class MingFlashOmniTalkerForConditionalGeneration(nn.Module, CustomProcessMixin)
         return gen_lat, inputs_embeds, stop_out
 
     @staticmethod
-    def _normalize_text(text: str) -> str:
-        text = text.replace("\r\n", "\n")
-        text = re.sub(r"[ \t]+", " ", text)
-        text = re.sub(r"\n{2,}", "\n", text)
-        return text.strip()
+    def _segment_text(text: str, max_length: int = 50) -> list[str]:
+        """Segment and normalize text using the upstream Ming pipeline.
 
-    def _segment_text(self, text: str, max_length: int = 50) -> list[str]:
-        """Lightweight sentence segmentation aligned with original Ming flow."""
-        normalized = self._normalize_text(text)
-        if not normalized:
-            return []
+        Uses ``segment_and_normalize`` which ports the full upstream flow:
+        tokenize_mixed_text_iterator → streaming sentence boundary detection
+        → cut_text_by_semantic_length → per-fragment normalize_numbers.
+        """
+        from .text_processing import segment_and_normalize
 
-        segments: list[str] = []
-        buffer: list[str] = []
-        boundaries = set("！？。，!?")
-
-        def flush_buffer() -> None:
-            if not buffer:
-                return
-            chunk = "".join(buffer).strip()
-            if chunk.startswith("，"):
-                chunk = chunk[1:].strip()
-            if chunk:
-                segments.append(chunk)
-            buffer.clear()
-
-        for ch in normalized:
-            buffer.append(ch)
-            should_flush = False
-            if ch == "\n":
-                should_flush = len(buffer) >= 8
-            elif ch in boundaries:
-                should_flush = len(buffer) >= 8
-            elif len(buffer) >= max_length:
-                should_flush = True
-
-            if should_flush:
-                flush_buffer()
-
-        flush_buffer()
-        return segments if segments else [normalized]
+        return segment_and_normalize(text, max_length=max_length)
 
     @staticmethod
     def _trim_trailing_silence(
