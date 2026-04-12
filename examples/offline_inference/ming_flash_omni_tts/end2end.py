@@ -105,6 +105,8 @@ def main():
 
     messages = get_messages(args.case, args.text)
     decode_args = {
+        # Standalone TTS deployment
+        "ming_task": "instruct",
         "max_decode_steps": 200,
         "cfg": 2.0,
         "sigma": 0.25,

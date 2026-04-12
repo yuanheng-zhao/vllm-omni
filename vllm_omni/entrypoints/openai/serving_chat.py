@@ -581,7 +581,10 @@ class OmniOpenAIServingChat(OpenAIServingChat, AudioMixin):
                 engine_prompt["additional_information"] = {}
             engine_prompt["additional_information"]["language"] = [language.strip()]
 
-        # Style control for Ming-flash-omni-2.0
+        # Style instruction — used by Ming-flash-omni instruct TTS path
+        # (ming_task="instruct").  For the omni speech path the thinker2talker
+        # bridge drops this field to match upstream omni_audio_generation
+        # which hardcodes instruction=None.
         instructions = getattr(request, "instructions", None)
         if instructions is not None and isinstance(instructions, str) and instructions.strip():
             if "additional_information" not in engine_prompt or engine_prompt["additional_information"] is None:

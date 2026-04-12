@@ -33,6 +33,7 @@ from vllm_omni.model_executor.models.output_templates import OmniOutput
 from vllm_omni.transformers_utils.configs.ming_flash_omni import MingFlashOmniTalkerConfig
 
 from .audio_vae import AudioVAE, AudioVAEConfig
+from .prompt_utils import DEFAULT_PROMPT as MING_DEFAULT_PROMPT
 from .talker_modules.aggregator import Aggregator
 from .talker_modules.cfm import CFM, get_epss_timesteps
 from .talker_modules.cfm_graph_executor import CFMGraphExecutorPool
@@ -762,18 +763,35 @@ class MingFlashOmniTalkerForConditionalGeneration(nn.Module, CustomProcessMixin)
         else:
             additional_info = {}
 
+        # ming_task selects which upstream Ming API this request mirrors:
+        #  "omni"     -> omni_audio_generation (thinker → talker hand-off,
+        #                hardcoded prompt + instruction=None, voice preset)
+        #  "instruct" -> instruct_audio_generation (TTS, caller-supplied
+        #                prompt + instruction caption JSON + sampling knobs)
+        ming_task = additional_info.get("ming_task", "instruct")
+
         text = additional_info.get("text", "")
-        prompt = additional_info.get("prompt", "Please generate speech based on the following description.\n")
         spk_emb = additional_info.get("spk_emb", None)
-        use_zero_spk_emb = additional_info.get("use_zero_spk_emb", False)
-        instruction = additional_info.get("instruction", None)
         prompt_text = additional_info.get("prompt_text", None)
         prompt_wav_lat = additional_info.get("prompt_wav_lat", None)
         prompt_wav_emb = additional_info.get("prompt_wav_emb", None)
-        cfg = additional_info.get("cfg", self.cfg_strength)
-        sigma = additional_info.get("sigma", 0.25)
-        temperature = additional_info.get("temperature", 0.0)
-        max_steps = int(additional_info.get("max_steps", additional_info.get("max_decode_steps", 20)))
+
+        if ming_task == "omni":
+            prompt = MING_DEFAULT_PROMPT
+            instruction = None
+            use_zero_spk_emb = False
+            cfg = 2.0
+            sigma = 0.25
+            temperature = 0.0
+            max_steps = 200
+        else:
+            prompt = additional_info.get("prompt", MING_DEFAULT_PROMPT)
+            instruction = additional_info.get("instruction", None)
+            use_zero_spk_emb = additional_info.get("use_zero_spk_emb", False)
+            cfg = additional_info.get("cfg", self.cfg_strength)
+            sigma = additional_info.get("sigma", 0.25)
+            temperature = additional_info.get("temperature", 0.0)
+            max_steps = int(additional_info.get("max_steps", additional_info.get("max_decode_steps", 200)))
         max_text_length = int(additional_info.get("max_text_length", 50))
         use_static_cache = bool(additional_info.get("use_static_cache", True))
         stream_decode = bool(additional_info.get("stream_decode", True))

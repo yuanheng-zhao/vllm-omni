@@ -1508,7 +1508,9 @@ class OmniOpenAIServingSpeech(OpenAIServing, AudioMixin):
         if request.instructions:
             caption_fields["风格"] = request.instructions
 
+        # TTS path applies ming task type `instruct`
         additional_information = {
+            "ming_task": "instruct",
             "prompt": MING_DEFAULT_PROMPT,
             "text": request.input,
             "instruction": ming_create_instruction(caption_fields),

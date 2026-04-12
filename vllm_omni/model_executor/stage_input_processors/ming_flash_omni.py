@@ -9,9 +9,6 @@ from typing import Any
 from vllm.inputs import TextPrompt
 
 from vllm_omni.inputs.data import OmniTokensPrompt
-from vllm_omni.model_executor.models.ming_flash_omni.prompt_utils import (
-    create_instruction as ming_create_instruction,
-)
 
 
 def _validate_stage_inputs(stage_list, engine_input_source):
@@ -60,11 +57,6 @@ def thinker2talker(
         if original_prompt is not None and hasattr(original_prompt, "additional_information"):
             additional_info = original_prompt.additional_information or {}
 
-        # Normalise instruction
-        instruction = additional_info.get("instruction", None)
-        if isinstance(instruction, str) and instruction and not instruction.lstrip().startswith("{"):
-            instruction = ming_create_instruction({"风格": instruction})
-
         # spk_emb can arrive serialised as a plain list from JSON requests;
         # the talker's spk_head wants a torch tensor.
         spk_emb = additional_info.get("spk_emb", None)
@@ -73,27 +65,30 @@ def thinker2talker(
 
             spk_emb = torch.tensor(spk_emb, dtype=torch.float32).unsqueeze(0)
 
-        max_decode_steps = int(additional_info.get("max_decode_steps", additional_info.get("max_steps", 200)))
-
-        # Build talker input with the generated text
+        # Omni speech path mirrors upstream `omni_audio_generation`:
+        # - `prompt` is hardcoded, `instruction` is forced to None,
+        #   cfg/sigma/temperature inherit the `tts_job` defaults (the
+        #   upstream API does NOT expose these knobs).
+        # - Voice cloning is preset-only via `voice_name` (default
+        #   'DB30'); `get_prompt_emb` is called with
+        #   `use_spk_emb=True, use_zero_spk_emb=False`, so when no
+        #   preset resolves upstream simply passes `spk_emb=None`
+        #   through to `tts_job` rather than substituting a zero
+        #   vector.
+        # The bridge only plumbs the request-specific fields; the
+        # talker `forward()` enforces the per-task defaults from
+        # `ming_task="omni"` so any stray caller overrides are ignored.
+        # TODO: the voice preset table (`data/voice_name.json`) is not
+        # yet ported
         talker_info = {
+            "ming_task": "omni",
             "text": generated_text,
-            "prompt": additional_info.get("prompt", "Please generate speech based on the following description.\n"),
             "spk_emb": spk_emb,
-            # Default to zero speaker embedding for the happy-path chat flow
-            # where the caller hasn't supplied a voice — matches the TTS
-            # /v1/audio/speech behaviour.
-            "use_zero_spk_emb": additional_info.get("use_zero_spk_emb", spk_emb is None),
-            "instruction": instruction,
+            "voice_name": additional_info.get("voice_name", "DB30"),
             "prompt_text": additional_info.get("prompt_text", None),
             "prompt_wav_lat": additional_info.get("prompt_wav_lat", None),
             "prompt_wav_emb": additional_info.get("prompt_wav_emb", None),
-            "max_steps": max_decode_steps,
-            "max_decode_steps": max_decode_steps,
             "max_text_length": additional_info.get("max_text_length", 50),
-            "cfg": additional_info.get("cfg", 2.0),
-            "sigma": additional_info.get("sigma", 0.25),
-            "temperature": additional_info.get("temperature", 0.0),
         }
 
         # Use dummy token IDs (talker builds its own embeddings from text)
