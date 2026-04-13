@@ -17,6 +17,7 @@ _CLASS_TO_MODULE: dict[str, str] = {
     "FishSpeechConfig": "vllm_omni.transformers_utils.configs.fish_speech",
     "FishSpeechSlowARConfig": "vllm_omni.transformers_utils.configs.fish_speech",
     "FishSpeechFastARConfig": "vllm_omni.transformers_utils.configs.fish_speech",
+    "VoxCPM2Config": "vllm_omni.transformers_utils.configs.voxcpm2",
     "BailingMoeV2Config": "vllm_omni.transformers_utils.configs.ming_flash_omni",
     "BailingMM2Config": "vllm_omni.transformers_utils.configs.ming_flash_omni",
     "MingFlashOmniThinkerConfig": "vllm_omni.transformers_utils.configs.ming_flash_omni",
@@ -33,6 +34,7 @@ __all__ = [
     "FishSpeechConfig",
     "FishSpeechSlowARConfig",
     "FishSpeechFastARConfig",
+    "VoxCPM2Config",
     "BailingMoeV2Config",
     "BailingMM2Config",
     "MingFlashOmniThinkerConfig",
@@ -60,3 +62,4 @@ def __dir__():
 from vllm_omni.transformers_utils.configs import fish_speech as _fish_speech  # noqa: F401, E402
 from vllm_omni.transformers_utils.configs import mammoth_moda2 as _mammoth_moda2  # noqa: F401, E402
 from vllm_omni.transformers_utils.configs import ming_flash_omni as _ming_flash_omni  # noqa: F401, E402
+from vllm_omni.transformers_utils.configs import voxcpm2 as _voxcpm2  # noqa: F401, E402
