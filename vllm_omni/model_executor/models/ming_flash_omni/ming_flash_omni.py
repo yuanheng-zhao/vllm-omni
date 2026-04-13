@@ -40,10 +40,7 @@ from vllm.sequence import IntermediateTensors
 from vllm_omni.model_executor.custom_process_mixin import CustomProcessMixin
 from vllm_omni.model_executor.models.output_templates import OmniOutput
 from vllm_omni.model_executor.models.utils import add_prefix_to_loaded_weights
-from vllm_omni.transformers_utils.configs.ming_flash_omni import (
-    MingFlashOmniConfig,
-    MingFlashOmniThinkerConfig,
-)
+from vllm_omni.transformers_utils.configs.ming_flash_omni import BailingMM2Config, MingFlashOmniConfig
 
 from .ming_flash_omni_thinker import (
     MingFlashOmniThinkerDummyInputsBuilder,
@@ -83,11 +80,11 @@ class MingFlashOmniForConditionalGeneration(
         self.config = config
 
         if isinstance(config, MingFlashOmniConfig):
-            thinker_config: MingFlashOmniThinkerConfig = config.thinker_config
+            thinker_config = config.thinker_config
         else:
-            thinker_config = config  # BailingMM2Config is the thinker config
-        self.thinker_config = thinker_config
+            thinker_config = config
 
+        self.thinker_config: BailingMM2Config = thinker_config
         self.model_stage = vllm_config.model_config.model_stage
 
         if self.model_stage == "thinker":

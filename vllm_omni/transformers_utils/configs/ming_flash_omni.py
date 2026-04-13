@@ -260,21 +260,16 @@ class BailingMM2Config(PretrainedConfig):
         return self.llm_config
 
 
-class MingFlashOmniThinkerConfig(BailingMM2Config):
-    # Override model type
-    model_type = "ming_flash_omni_thinker"
-
-
 class MingFlashOmniConfig(PretrainedConfig):
     """Configuration class for unified Ming-flash-omni-2.0 model"""
 
     model_type = "ming_flash_omni"
     is_composition = True
-    sub_configs: ClassVar = {"thinker_config": MingFlashOmniThinkerConfig}
+    sub_configs: ClassVar = {"thinker_config": BailingMM2Config}
 
     def __init__(
         self,
-        thinker_config: MingFlashOmniThinkerConfig | None = None,
+        thinker_config: BailingMM2Config | None = None,
         image_gen_config: dict[str, Any] | None = None,
         talker_config: dict[str, Any] | None = None,
         **kwargs,
@@ -282,9 +277,9 @@ class MingFlashOmniConfig(PretrainedConfig):
         super().__init__(**kwargs)
 
         if isinstance(thinker_config, dict):
-            self.thinker_config = MingFlashOmniThinkerConfig(**thinker_config)
+            self.thinker_config = BailingMM2Config(**thinker_config)
         else:
-            self.thinker_config = thinker_config or MingFlashOmniThinkerConfig()
+            self.thinker_config = thinker_config or BailingMM2Config()
 
         # Image generation config (for future implementation)
         self.image_gen_config = image_gen_config
@@ -299,11 +294,9 @@ class MingFlashOmniConfig(PretrainedConfig):
 # Register model_type -> config class for AutoConfig
 AutoConfig.register(BailingMoeV2Config.model_type, BailingMoeV2Config)
 AutoConfig.register(BailingMM2Config.model_type, BailingMM2Config)
-AutoConfig.register(MingFlashOmniThinkerConfig.model_type, MingFlashOmniThinkerConfig)
 AutoConfig.register(MingFlashOmniConfig.model_type, MingFlashOmniConfig)
 
 # Register tokenizer mapping for composition configs so that
 # AutoTokenizer.from_pretrained can resolve the tokenizer class
 AutoTokenizer.register(BailingMM2Config, fast_tokenizer_class=PreTrainedTokenizerFast)
-AutoTokenizer.register(MingFlashOmniThinkerConfig, fast_tokenizer_class=PreTrainedTokenizerFast)
 AutoTokenizer.register(MingFlashOmniConfig, fast_tokenizer_class=PreTrainedTokenizerFast)
