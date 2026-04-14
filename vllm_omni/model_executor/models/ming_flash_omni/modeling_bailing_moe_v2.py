@@ -397,18 +397,16 @@ class BailingMoeV2SparseMoeBlock(nn.Module):
             # if image_mask is not None and audio_mask is not None:
             #     assert torch.logical_and(image_mask, audio_mask).sum() == 0
 
-            image_topk_idx, image_topk_weight, image_router_logits = self.image_gate(hidden_states)
-            audio_topk_idx, audio_topk_weight, audio_router_logits = self.audio_gate(hidden_states)
-            topk_idx, topk_weight, router_logits = self.gate(hidden_states)
+            image_topk_idx, image_topk_weight, _ = self.image_gate(hidden_states)
+            audio_topk_idx, audio_topk_weight, _ = self.audio_gate(hidden_states)
+            topk_idx, topk_weight, _ = self.gate(hidden_states)
 
             topk_idx = torch.where(image_mask, image_topk_idx, topk_idx)
             topk_weight = torch.where(image_mask, image_topk_weight, topk_weight)
-            router_logits = torch.where(image_mask, image_router_logits, router_logits)
             topk_idx = torch.where(audio_mask, audio_topk_idx, topk_idx)
             topk_weight = torch.where(audio_mask, audio_topk_weight, topk_weight)
-            router_logits = torch.where(audio_mask, audio_router_logits, router_logits)
         else:
-            topk_idx, topk_weight, router_logits = self.gate(hidden_states)
+            topk_idx, topk_weight, _ = self.gate(hidden_states)
 
         # Pack pre-computed routing into a single tensor
         packed_routing = torch.cat(
@@ -419,7 +417,7 @@ class BailingMoeV2SparseMoeBlock(nn.Module):
             dim=-1,
         )
 
-        # SharedFusedMoE expects 2D hidden_states and router_logits
+        # SharedFusedMoE expects 2D hidden_states
         hidden_states_2d = hidden_states.view(-1, h)
         result = self.experts(hidden_states_2d, packed_routing)
 
