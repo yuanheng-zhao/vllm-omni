@@ -139,7 +139,7 @@ class MingFlashOmniThinkerProcessingInfo(Qwen2VLProcessingInfo):
 
     def get_feature_extractor(self, **kwargs: object) -> MingWhisperFeatureExtractor:
         hf_processor = self.get_hf_processor(**kwargs)
-        feature_extractor = hf_processor.audio_processor  # type: ignore
+        feature_extractor = hf_processor.audio_processor
         assert isinstance(feature_extractor, MingWhisperFeatureExtractor)
         return feature_extractor
 
@@ -243,17 +243,18 @@ class MingFlashOmniThinkerMultiModalProcessor(BaseMultiModalProcessor[MingFlashO
 
         def get_replacement_image(item_idx: int) -> PromptUpdateDetails:
             """Generate token sequence for an image."""
-            grid_thw = out_mm_data.get("image_grid_thw", None)
+            grid_thw = out_mm_data.get("image_grid_thw")
             if grid_thw is None:
-                logger.warning("image_grid_thw not found in output, using default 256 patches")
-                num_patches = 256
+                raise ValueError(
+                    "image_grid_thw missing from processor output; "
+                    "cannot determine image patch count for prompt replacement."
+                )
+            if isinstance(grid_thw, torch.Tensor):
+                thw = grid_thw[item_idx]
+                num_patches = int(thw.prod().item()) // (spatial_merge_size**2)
             else:
-                if isinstance(grid_thw, torch.Tensor):
-                    thw = grid_thw[item_idx]
-                    num_patches = int(thw.prod().item()) // (spatial_merge_size**2)
-                else:
-                    thw = grid_thw[item_idx]
-                    num_patches = (thw[0] * thw[1] * thw[2]) // (spatial_merge_size**2)
+                thw = grid_thw[item_idx]
+                num_patches = (thw[0] * thw[1] * thw[2]) // (spatial_merge_size**2)
 
             # Build token sequence: <image> <imagePatch>*N </image> \n
             # the newline token is added in purpose from original model processing
@@ -272,15 +273,16 @@ class MingFlashOmniThinkerMultiModalProcessor(BaseMultiModalProcessor[MingFlashO
             """Generate token sequence for a video."""
             grid_thw = out_mm_data.get("video_grid_thw", None)
             if grid_thw is None:
-                logger.warning("video_grid_thw not found in output, using default 512 patches")
-                num_patches = 512
+                raise ValueError(
+                    "video_grid_thw missing from processor output; "
+                    "cannot determine video patch count for prompt replacement."
+                )
+            if isinstance(grid_thw, torch.Tensor):
+                thw = grid_thw[item_idx]
+                num_patches = int(thw.prod().item()) // (spatial_merge_size**2)
             else:
-                if isinstance(grid_thw, torch.Tensor):
-                    thw = grid_thw[item_idx]
-                    num_patches = int(thw.prod().item()) // (spatial_merge_size**2)
-                else:
-                    thw = grid_thw[item_idx]
-                    num_patches = (thw[0] * thw[1] * thw[2]) // (spatial_merge_size**2)
+                thw = grid_thw[item_idx]
+                num_patches = (thw[0] * thw[1] * thw[2]) // (spatial_merge_size**2)
 
             # Build token sequence: <video> <framePatch>*N </video> \n
             # the newline token is added in purpose from original model processing
@@ -297,13 +299,14 @@ class MingFlashOmniThinkerMultiModalProcessor(BaseMultiModalProcessor[MingFlashO
             """Generate token sequence for an audio."""
             encoder_feats_lengths = out_mm_data.get("encoder_feats_lengths", None)
             if encoder_feats_lengths is None:
-                logger.warning("encoder_feats_lengths not found in output, using default 100 patches")
-                num_patches = 100
+                raise ValueError(
+                    "encoder_feats_lengths missing from processor output; "
+                    "cannot determine audio patch count for prompt replacement."
+                )
+            if isinstance(encoder_feats_lengths, torch.Tensor):
+                num_patches = int(encoder_feats_lengths[item_idx].item())
             else:
-                if isinstance(encoder_feats_lengths, torch.Tensor):
-                    num_patches = int(encoder_feats_lengths[item_idx].item())
-                else:
-                    num_patches = encoder_feats_lengths[item_idx]
+                num_patches = encoder_feats_lengths[item_idx]
 
             # Build token sequence: <audio> <audioPatch>*N </audio>
             tokens: list[int] = []
@@ -412,7 +415,7 @@ class MingFlashOmniThinkerMultiModalProcessor(BaseMultiModalProcessor[MingFlashO
         data: dict[str, object] = {}
 
         images = mm_data.get("images", None)
-        if images is not None and hf_processor.image_processor is not None:
+        if images is not None:
             image_outputs = hf_processor.image_processor(
                 images=images,
                 videos=None,
@@ -421,7 +424,7 @@ class MingFlashOmniThinkerMultiModalProcessor(BaseMultiModalProcessor[MingFlashO
             data.update(image_outputs)
 
         videos = mm_data.get("videos", None)
-        if videos is not None and hf_processor.image_processor is not None:
+        if videos is not None:
             video_outputs = hf_processor.image_processor(
                 images=None,
                 videos=videos,
@@ -435,7 +438,7 @@ class MingFlashOmniThinkerMultiModalProcessor(BaseMultiModalProcessor[MingFlashO
             data.update(video_outputs)
 
         audios = mm_data.get("audios", None)
-        if audios is not None and hf_processor.audio_processor is not None:
+        if audios is not None:
             # vLLM's AudioProcessorItems provides raw numpy arrays (already resampled).
             # MingWhisperAudioProcessor expects (waveform, sr) tuples,
             # so wrap them with the target sample rate.
@@ -493,6 +496,15 @@ class MingFlashOmniThinkerForConditionalGeneration(
         config = vllm_config.model_config.hf_config
 
         thinker_config: BailingMM2Config = config
+        if (
+            thinker_config.llm_config is None
+            or thinker_config.vision_config is None
+            or thinker_config.audio_config is None
+        ):
+            raise ValueError(
+                "MingFlashOmniThinker requires `llm_config`, `vision_config`, and `audio_config` in `thinker_config`."
+            )
+
         llm_config = thinker_config.llm_config
 
         self.config = llm_config
@@ -506,51 +518,40 @@ class MingFlashOmniThinkerForConditionalGeneration(
                 vllm_config=llm_vllm_config, prefix=maybe_prefix(prefix, "llm")
             )
 
-        # Initialize vision encoder if configured
-        self.vision = None
-        self.linear_proj = None
-        if thinker_config and thinker_config.vision_config:
-            with self._mark_tower_model(vllm_config, {"image", "video"}):
-                self.vision = MingVisionEncoder(
-                    vision_config=thinker_config.vision_config,
-                    quant_config=vllm_config.quant_config,
-                    prefix=maybe_prefix(prefix, "vision"),
-                )
-                self.linear_proj = VisionProjector(
-                    vision_dim=self.vision.image_emb_dim,
-                    llm_dim=llm_config.hidden_size,
-                    mlp_depth=getattr(thinker_config, "mlp_depth", 2),
-                )
-            logger.info("Initialized MingVisionEncoder and VisionProjector")
+        # Ming thinker is inherently multimodal; initialize both towers eagerly.
+        with self._mark_tower_model(vllm_config, {"image", "video"}):
+            self.vision = MingVisionEncoder(
+                vision_config=thinker_config.vision_config,
+                quant_config=vllm_config.quant_config,
+                prefix=maybe_prefix(prefix, "vision"),
+            )
+            self.linear_proj = VisionProjector(
+                vision_dim=self.vision.image_emb_dim,
+                llm_dim=llm_config.hidden_size,
+                mlp_depth=getattr(thinker_config, "mlp_depth", 2),
+            )
+        logger.info("Initialized MingVisionEncoder and VisionProjector")
 
-        # Initialize audio encoder if configured
-        self.audio = None
-        self.linear_proj_audio = None
-        if thinker_config and thinker_config.audio_config:
-            audio_cfg = thinker_config.audio_config
-            whisper_cfg = getattr(audio_cfg, "whisper_encoder_config", {}) or {}
-            with self._mark_tower_model(vllm_config, "audio"):
-                self.audio = WhisperAudioEncoder(
-                    **whisper_cfg,
-                    use_flash_attn=True,
-                )
-                self.linear_proj_audio = AudioProjector(
-                    audio_dim=self.audio.audio_emb_dim,
-                    llm_dim=llm_config.hidden_size,
-                    ds_kernel_size=getattr(audio_cfg, "ds_kernel_size", 3),
-                    ds_stride=getattr(audio_cfg, "ds_stride", 2),
-                    mlp_depth=getattr(thinker_config, "mlp_depth", 1),
-                )
-            logger.info("Initialized WhisperAudioEncoder and AudioProjector")
+        audio_cfg = thinker_config.audio_config
+        whisper_cfg = getattr(audio_cfg, "whisper_encoder_config", {}) or {}
+        with self._mark_tower_model(vllm_config, "audio"):
+            self.audio = WhisperAudioEncoder(
+                **whisper_cfg,
+                use_flash_attn=True,
+            )
+            self.linear_proj_audio = AudioProjector(
+                audio_dim=self.audio.audio_emb_dim,
+                llm_dim=llm_config.hidden_size,
+                ds_kernel_size=getattr(audio_cfg, "ds_kernel_size", 3),
+                ds_stride=getattr(audio_cfg, "ds_stride", 2),
+                mlp_depth=getattr(thinker_config, "mlp_depth", 1),
+            )
+        logger.info("Initialized WhisperAudioEncoder and AudioProjector")
 
         # Expose interfaces
         self.make_empty_intermediate_tensors = self.language_model.make_empty_intermediate_tensors
 
-        logger.info(
-            f"MingFlashOmniThinker initialized with: "
-            f"vision={'yes' if self.vision else 'no'}, "
-            f"audio={'yes' if self.audio else 'no'}"
-        )
+        logger.info("MingFlashOmniThinker initialized with vision and audio towers")
 
     def extract_image_feature(self, pixel_values: torch.Tensor, grid_thw: torch.Tensor) -> torch.Tensor:
         """Extract and project image features.
@@ -565,7 +566,7 @@ class MingFlashOmniThinkerForConditionalGeneration(
         if self.vision is None:
             raise ValueError("Vision encoder not initialized")
 
-        with torch.amp.autocast("cuda", dtype=torch.bfloat16):
+        with torch.amp.autocast(pixel_values.device.type, dtype=torch.bfloat16):
             image_embeds = self.vision(pixel_values, grid_thw=grid_thw)
 
         if self.vision.use_deepstack:
@@ -616,11 +617,7 @@ class MingFlashOmniThinkerForConditionalGeneration(
         # Project packed
         proj_packed, proj_lens = self.linear_proj_audio.forward_packed(audio_packed, encoded_lens)
 
-        normalize = (
-            self.thinker_config
-            and self.thinker_config.audio_config
-            and getattr(self.thinker_config.audio_config, "norm_query_embeds", False)
-        )
+        normalize = getattr(self.thinker_config.audio_config, "norm_query_embeds", False)
         if normalize:
             proj_packed = F.normalize(proj_packed, dim=-1)
 
@@ -716,11 +713,11 @@ class MingFlashOmniThinkerForConditionalGeneration(
         multimodal_embeddings: tuple[torch.Tensor, ...] = ()
 
         for modality, mm_input in mm_input_by_modality.items():
-            if modality == "image" and self.vision is not None:
+            if modality == "image":
                 multimodal_embeddings += tuple(self._process_image_input(mm_input))  # type: ignore[arg-type]
-            elif modality == "video" and self.vision is not None:
+            elif modality == "video":
                 multimodal_embeddings += tuple(self._process_video_input(mm_input))  # type: ignore[arg-type]
-            elif modality == "audio" and self.audio is not None:
+            elif modality == "audio":
                 multimodal_embeddings += tuple(self._process_audio_input(mm_input))  # type: ignore[arg-type]
 
         return multimodal_embeddings

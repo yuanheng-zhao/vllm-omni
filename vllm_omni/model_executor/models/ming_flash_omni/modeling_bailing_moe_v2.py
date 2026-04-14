@@ -789,16 +789,18 @@ class BailingMoeV2ForCausalLM(nn.Module, CustomProcessMixin):
             prefix=maybe_prefix(prefix, "model"),
         )
 
-        self.lm_head = ParallelLMHead(
-            config.vocab_size,
-            config.hidden_size,
-            quant_config=quant_config,
-            prefix=maybe_prefix(prefix, "lm_head"),
-        )
-
         self.tie_word_embeddings = getattr(config, "tie_word_embeddings", False)
-        if self.tie_word_embeddings:
-            self.lm_head.weight = self.model.word_embeddings.weight
+        if get_pp_group().is_last_rank:
+            self.lm_head = ParallelLMHead(
+                config.vocab_size,
+                config.hidden_size,
+                quant_config=quant_config,
+                prefix=maybe_prefix(prefix, "lm_head"),
+            )
+            if self.tie_word_embeddings:
+                self.lm_head.weight = self.model.word_embeddings.weight
+        else:
+            self.lm_head = PPMissingLayer()
 
         self.logits_processor = LogitsProcessor(config.vocab_size)
         self.sampler = Sampler()

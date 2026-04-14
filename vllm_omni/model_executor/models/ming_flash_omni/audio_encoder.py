@@ -61,13 +61,8 @@ class MultiHeadAttention(nn.Module):
 
         # Try flash attention varlen
         if self.use_flash_attn and cu_seqlens is not None and q.dtype in [torch.float16, torch.bfloat16]:
-            try:
-                max_seqlen = (cu_seqlens[1:] - cu_seqlens[:-1]).max().item()
-                attn_output = flash_attn_varlen_func(q, k, v, cu_seqlens, cu_seqlens, max_seqlen, max_seqlen)
-            except Exception as e:
-                logger.warning(f"Flash attention varlen failed ({e}), falling back to manual")
-                self.use_flash_attn = False  # disable for future calls
-                attn_output = self._manual_attention(q, k, v, cu_seqlens)
+            max_seqlen = (cu_seqlens[1:] - cu_seqlens[:-1]).max().item()
+            attn_output = flash_attn_varlen_func(q, k, v, cu_seqlens, cu_seqlens, max_seqlen, max_seqlen)
         else:
             attn_output = self._manual_attention(q, k, v, cu_seqlens)
 

@@ -167,6 +167,15 @@ class MingFlashOmniProcessor(ProcessorMixin):
         merge_size: int = 2,
         **kwargs,
     ):
+        # Enforce that all sub-processors exist
+        # Keep None defaults in the signature for HF ProcessorMixin compatibility
+        if image_processor is None:
+            raise ValueError("MingFlashOmniProcessor requires `image_processor`.")
+        if audio_processor is None:
+            raise ValueError("MingFlashOmniProcessor requires `audio_processor`.")
+        if tokenizer is None:
+            raise ValueError("MingFlashOmniProcessor requires `tokenizer`.")
+
         self.spatial_merge_size = merge_size
         self.image_token = PLACEHOLDER_IMAGE_TOKEN_IN_TEXT
         self.video_token = PLACEHOLDER_VIDEO_TOKEN_IN_TEXT
@@ -177,8 +186,8 @@ class MingFlashOmniProcessor(ProcessorMixin):
             tokenizer=tokenizer,
         )
 
-        # fall back to the tokenizer's own chat_template.
-        if self.chat_template is None and tokenizer is not None:
+        # Fall back to the tokenizer's own chat_template.
+        if self.chat_template is None:
             self.chat_template = getattr(tokenizer, "chat_template", None)
 
     def __call__(
@@ -199,7 +208,7 @@ class MingFlashOmniProcessor(ProcessorMixin):
 
         data: dict[str, Any] = {}
 
-        if images is not None and self.image_processor is not None:
+        if images is not None:
             image_outputs = self.image_processor(
                 images=images,
                 videos=None,
@@ -210,7 +219,7 @@ class MingFlashOmniProcessor(ProcessorMixin):
             if "image_grid_thw" in image_outputs:
                 text = self._expand_image_tokens(text, image_outputs["image_grid_thw"])
 
-        if videos is not None and self.image_processor is not None:
+        if videos is not None:
             video_outputs = self.image_processor(
                 images=None,
                 videos=videos,
@@ -225,7 +234,7 @@ class MingFlashOmniProcessor(ProcessorMixin):
             if "video_grid_thw" in video_outputs:
                 text = self._expand_video_tokens(text, video_outputs["video_grid_thw"])
 
-        if audios is not None and self.audio_processor is not None:
+        if audios is not None:
             audio_outputs = self.audio_processor(
                 audios,
                 return_tensors="pt",
@@ -329,7 +338,7 @@ class MingFlashOmniProcessor(ProcessorMixin):
         use_cot_system_prompt: bool = False,
         **kwargs,
     ) -> str:
-        eos = self.tokenizer.eos_token if self.tokenizer is not None else "</s>"
+        eos = self.tokenizer.eos_token
         text = self.apply_system_template(sys_prompt_exp, use_cot_system_prompt) + eos
 
         for idx, message in enumerate(conversation):
@@ -409,10 +418,12 @@ class MingFlashOmniProcessor(ProcessorMixin):
 
     @property
     def model_input_names(self):
-        tokenizer_input_names = self.tokenizer.model_input_names if self.tokenizer else []
-        image_processor_input_names = self.image_processor.model_input_names if self.image_processor else []
-        audio_processor_input_names = self.audio_processor.model_input_names if self.audio_processor else []
-        return list(dict.fromkeys(tokenizer_input_names + image_processor_input_names + audio_processor_input_names))
+        names = (
+            self.tokenizer.model_input_names
+            + self.image_processor.model_input_names
+            + self.audio_processor.model_input_names
+        )
+        return list(dict.fromkeys(names))
 
 
 AutoFeatureExtractor.register("MingWhisperFeatureExtractor", MingWhisperFeatureExtractor)
