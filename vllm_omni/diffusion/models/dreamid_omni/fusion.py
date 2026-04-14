@@ -1,3 +1,5 @@
+import re
+
 import torch
 import torch.nn as nn
 from vllm.logger import init_logger
@@ -285,6 +287,26 @@ class FusionModel(nn.Module):
                     for i in range(self.num_blocks)
                 ]
             )
+
+    def load_state_dict(self, state_dict, strict=True, assign=False):
+        """Remap checkpoints where blocks are stored under
+        `video_model.blocks.N.*` / `audio_model.blocks.N.*` to the current
+        `fused_blocks.N.vid_block.*` / `fused_blocks.N.audio_block.*`.
+        """
+        needs_remap = any(re.match(r"^(video_model|audio_model)\.blocks\.\d+\.", k) for k in state_dict)
+        if needs_remap:
+            remapped = {}
+            for k, v in state_dict.items():
+                remapped[k] = v
+                new_k = re.sub(r"^video_model\.blocks\.(\d+)\.", r"fused_blocks.\1.vid_block.", k)
+                if new_k != k:
+                    remapped[new_k] = v
+                    continue
+                new_k = re.sub(r"^audio_model\.blocks\.(\d+)\.", r"fused_blocks.\1.audio_block.", k)
+                if new_k != k:
+                    remapped[new_k] = v
+            state_dict = remapped
+        return super().load_state_dict(state_dict, strict=strict, assign=assign)
 
     def inject_cross_attention_kv_projections(self):
         for vid_block in self.video_model.blocks:
