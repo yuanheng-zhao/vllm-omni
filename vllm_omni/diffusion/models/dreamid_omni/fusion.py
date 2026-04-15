@@ -237,7 +237,7 @@ class FusedBlock(nn.Module):
 
 
 class FusionModel(nn.Module):
-    _layerwise_offload_blocks_attr = "fused_blocks"
+    _layerwise_offload_blocks_attrs = ["fused_blocks"]
 
     def __init__(self, video_config=None, audio_config=None):
         super().__init__()
@@ -287,6 +287,7 @@ class FusionModel(nn.Module):
                     for i in range(self.num_blocks)
                 ]
             )
+        self._blocks_detached_from_backbones = False
 
     def load_state_dict(self, state_dict, strict=True, assign=False):
         """Remap checkpoints where blocks are stored under
@@ -301,12 +302,20 @@ class FusionModel(nn.Module):
                 new_k = re.sub(r"^video_model\.blocks\.(\d+)\.", r"fused_blocks.\1.vid_block.", k)
                 if new_k != k:
                     remapped[new_k] = v
+                    if self._blocks_detached_from_backbones:
+                        remapped.pop(k, None)
                     continue
                 new_k = re.sub(r"^audio_model\.blocks\.(\d+)\.", r"fused_blocks.\1.audio_block.", k)
                 if new_k != k:
                     remapped[new_k] = v
+                    if self._blocks_detached_from_backbones:
+                        remapped.pop(k, None)
             state_dict = remapped
-        return super().load_state_dict(state_dict, strict=strict, assign=assign)
+        result = super().load_state_dict(state_dict, strict=strict, assign=assign)
+        if not self._blocks_detached_from_backbones:
+            self._detach_blocks_from_backbones()
+
+        return result
 
     def inject_cross_attention_kv_projections(self):
         for vid_block in self.video_model.blocks:
@@ -324,6 +333,29 @@ class FusionModel(nn.Module):
             audio_block.cross_attn.norm_k_fusion = (
                 WanRMSNorm(audio_block.dim, eps=1e-6) if audio_block.qk_norm else nn.Identity()
             )
+
+    def _detach_blocks_from_backbones(self) -> None:
+        """Keep offloadable blocks owned only by a single place.
+
+        NOTE: This is a special workaround to support layerwise offloading.
+        The model registers the same Wan blocks under both the video/audio
+        backbones and `fused_blocks` which is a wrapper for unified blocks
+        walking through. However, layerwise offloading will only consider
+        `fused_blocks` as offloadable components and will materialize all
+        other modules onto device, including the same blocks owned by both
+        `fused_blocks` and `video_model` and `audio_model`.
+        """
+        if self._blocks_detached_from_backbones:
+            return
+
+        video_blocks = list(self.video_model.blocks)
+        audio_blocks = list(self.audio_model.blocks)
+        self.video_model._modules.pop("blocks", None)
+        self.audio_model._modules.pop("blocks", None)
+        self.video_model.blocks = tuple(video_blocks)
+        self.audio_model.blocks = tuple(audio_blocks)
+
+        self._blocks_detached_from_backbones = True
 
     def merge_kwargs(self, vid_kwargs, audio_kwargs):
         """
