@@ -134,7 +134,7 @@ class StageMetadata:
     """Lightweight stage attributes extracted from stage_config."""
 
     stage_id: int
-    stage_type: Literal["llm", "diffusion"]
+    stage_type: Literal["llm", "diffusion", "vae"]
     engine_output_type: str | None
     is_comprehension: bool
     requires_multimodal_data: bool
@@ -166,7 +166,7 @@ class StartedLlmStage:
 def extract_stage_metadata(stage_config: Any) -> StageMetadata:
     """Pure data extraction from a stage_config object."""
     stage_id: int = stage_config.stage_id
-    stage_type: Literal["llm", "diffusion"] = getattr(stage_config, "stage_type", "llm")
+    stage_type: Literal["llm", "diffusion", "vae"] = getattr(stage_config, "stage_type", "llm")
     engine_args = stage_config.engine_args
 
     if current_omni_platform.is_rocm():
@@ -207,6 +207,22 @@ def extract_stage_metadata(stage_config: Any) -> StageMetadata:
     if _ckf_path:
         _mod, _fn = _ckf_path.rsplit(".", 1)
         cfg_kv_collect_func = getattr(importlib.import_module(_mod), _fn)
+
+    if stage_type == "vae":
+        return StageMetadata(
+            stage_id=stage_id,
+            stage_type="vae",
+            engine_output_type=None,
+            is_comprehension=False,
+            requires_multimodal_data=False,
+            engine_input_source=engine_input_source,
+            final_output=final_output,
+            final_output_type=final_output_type or "image",
+            default_sampling_params=default_sampling_params,
+            custom_process_input_func=custom_process_input_func,
+            model_stage=None,
+            runtime_cfg=runtime_cfg,
+        )
 
     if stage_type == "diffusion":
         return StageMetadata(
@@ -547,6 +563,33 @@ def initialize_diffusion_stage(
     od_config = build_diffusion_config(model, stage_cfg, metadata)
     return StageDiffusionClient(
         model, od_config, metadata, stage_init_timeout=stage_init_timeout, batch_size=batch_size
+    )
+
+
+def initialize_vae_stage(
+    model: str,
+    stage_cfg: Any,
+    metadata: StageMetadata,
+    stage_init_timeout: int,
+) -> Any:
+    """Build a :class:`StageVAEClient` for a dedicated VAE stage (#2089)."""
+    from vllm_omni.diffusion.stage_vae_client import StageVAEClient
+
+    engine_args = _to_dict(stage_cfg.engine_args)
+    runtime = getattr(stage_cfg, "runtime", {}) or {}
+    devices_str = runtime.get("devices") if hasattr(runtime, "get") else getattr(runtime, "devices", None)
+    first_device = None
+    if devices_str:
+        first_device = str(devices_str).split(",")[0].strip()
+    device = f"cuda:{first_device}" if first_device else engine_args.get("device", "cuda:0")
+
+    return StageVAEClient(
+        model=model,
+        vae_subfolder=engine_args.get("vae_subfolder", "vae"),
+        torch_dtype=engine_args.get("torch_dtype", "bfloat16"),
+        device=device,
+        stage_init_timeout=stage_init_timeout,
+        metadata=metadata,
     )
 
 

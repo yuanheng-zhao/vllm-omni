@@ -71,6 +71,7 @@ from vllm_omni.engine.stage_init_utils import (
     finalize_initialized_stages,
     get_stage_connector_spec,
     initialize_diffusion_stage,
+    initialize_vae_stage,
     inject_kv_stage_info,
     load_omni_transfer_config_for_model,
     prepare_engine_environment,
@@ -725,6 +726,28 @@ class AsyncOmniEngine:
                     )
 
                     omni_kv_connector = resolve_omni_kv_config_for_stage(omni_transfer_config, configured_stage_id)
+
+                    if metadata.stage_type == "vae":
+                        with llm_stage_launch_lock:
+                            previous_visible_devices = os.environ.get(device_control_env)
+                            try:
+                                setup_stage_devices(configured_stage_id, metadata.runtime_cfg)
+                                stage_clients[stage_idx] = initialize_vae_stage(
+                                    self.model,
+                                    stage_cfg,
+                                    metadata,
+                                    stage_init_timeout=stage_init_timeout,
+                                )
+                                logger.info(
+                                    "[AsyncOmniEngine] Stage %s initialized (vae)",
+                                    configured_stage_id,
+                                )
+                            finally:
+                                if previous_visible_devices is None:
+                                    current_omni_platform.unset_device_control_env_var()
+                                else:
+                                    current_omni_platform.set_device_control_env_var(previous_visible_devices)
+                        continue
 
                     if metadata.stage_type == "diffusion":
                         is_remote_diffusion_stage = (

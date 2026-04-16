@@ -111,6 +111,10 @@ class StageDiffusionClient:
         self._pending_rpcs: set[str] = set()
         self._tasks: dict[str, asyncio.Task] = {}
         self._shutting_down = False
+        # Mirrors the LLM stage-client surface: the orchestrator stashes the
+        # most recent output here so the *next* stage's custom_process_input_func
+        # can pick the right engine_outputs when stitching payloads.
+        self.engine_outputs: list[Any] | None = None
 
         logger.info(
             "[StageDiffusionClient] Stage-%s initialized (owns_process=%s, batch_size=%d)",
@@ -305,6 +309,10 @@ class StageDiffusionClient:
                     return None
                 raise RuntimeError(f"StageDiffusionProc died unexpectedly (exit code {exitcode})")
             return None
+
+    def set_engine_outputs(self, outputs: list[Any]) -> None:
+        """Stash the most recent outputs for downstream stage bridging."""
+        self.engine_outputs = list(outputs)
 
     async def abort_requests_async(self, request_ids: list[str]) -> None:
         self._request_socket.send(
