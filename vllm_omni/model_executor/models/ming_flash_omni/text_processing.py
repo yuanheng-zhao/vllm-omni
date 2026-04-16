@@ -177,49 +177,67 @@ def cut_text_by_semantic_length(
                 s += "。"
             sentences.append(s)
 
-    # Phase 2+3: split sentences into clauses, merge short tails
+    # Phase 2: merge whole sentences; only clause-split oversized ones.
+    # This ensures split points land on sentence boundaries (。！？)
+    # rather than mid-sentence commas.
     result_fragments: list[str] = []
     for sentence in sentences:
-        clauses: list[str] = []
-        clause_buf: list[str] = []
-        for char in sentence:
-            clause_buf.append(char)
-            if char in "，;；":
+        sent_len = get_semantic_length(sentence)
+
+        if sent_len > max_semantic_length:
+            # Oversized sentence: fall back to clause-level splitting
+            clauses: list[str] = []
+            clause_buf: list[str] = []
+            for char in sentence:
+                clause_buf.append(char)
+                if char in "，;；":
+                    cl = "".join(clause_buf).strip()
+                    if cl and has_valid_content(cl):
+                        clauses.append(cl)
+                    elif cl and clauses:
+                        clauses[-1] += cl
+                    clause_buf = []
+            if clause_buf:
                 cl = "".join(clause_buf).strip()
                 if cl and has_valid_content(cl):
                     clauses.append(cl)
                 elif cl and clauses:
                     clauses[-1] += cl
-                clause_buf = []
-        if clause_buf:
-            cl = "".join(clause_buf).strip()
-            if cl and has_valid_content(cl):
-                clauses.append(cl)
-            elif cl and clauses:
-                clauses[-1] += cl
 
-        i = 0
-        while i < len(clauses):
-            clause = clauses[i]
-            clause_len = get_semantic_length(clause)
+            i = 0
+            while i < len(clauses):
+                clause = clauses[i]
+                clause_len = get_semantic_length(clause)
 
-            if clause_len < min_tail_length and i + 1 < len(clauses):
-                combined = clause + clauses[i + 1]
-                if get_semantic_length(combined) <= max_semantic_length:
+                if clause_len < min_tail_length and i + 1 < len(clauses):
+                    combined = clause + clauses[i + 1]
+                    if get_semantic_length(combined) <= max_semantic_length:
+                        result_fragments = append_text_fragment(
+                            result_fragments, combined, max_semantic_length, min_tail_length
+                        )
+                        i += 2
+                        continue
+
+                if clause_len > max_semantic_length:
+                    for frag in split_long_fragment(clause, max_semantic_length):
+                        result_fragments = append_text_fragment(
+                            result_fragments, frag, max_semantic_length, min_tail_length
+                        )
+                else:
                     result_fragments = append_text_fragment(
-                        result_fragments, combined, max_semantic_length, min_tail_length
+                        result_fragments, clause, max_semantic_length, min_tail_length
                     )
-                    i += 2
-                    continue
-
-            if clause_len > max_semantic_length:
-                for frag in split_long_fragment(clause, max_semantic_length):
-                    result_fragments = append_text_fragment(
-                        result_fragments, frag, max_semantic_length, min_tail_length
-                    )
+                i += 1
+        else:
+            # Normal sentence: merge at sentence level
+            if not result_fragments:
+                result_fragments.append(sentence)
             else:
-                result_fragments = append_text_fragment(result_fragments, clause, max_semantic_length, min_tail_length)
-            i += 1
+                last_len = get_semantic_length(result_fragments[-1])
+                if last_len + sent_len <= max_semantic_length:
+                    result_fragments[-1] += sentence
+                else:
+                    result_fragments.append(sentence)
 
     return [f.replace(_DOT_PLACEHOLDER, ".") for f in result_fragments]
 
@@ -519,25 +537,30 @@ def segment_and_normalize(
     text: str,
     max_length: int = 50,
 ) -> list[str]:
-    """Full upstream-equivalent text processing pipeline for Ming TTS.
+    """Text processing pipeline for Ming TTS (batch mode).
 
-    1. Streaming sentence boundary detection (tokenize → accumulate → flush)
-    2. Semantic-length-aware clause segmentation
-    3. Per-fragment normalization (English number expansion)
+    Uses ``cut_text_by_semantic_length`` directly rather than the streaming
+    ``detect_sentence_boundaries`` algorithm.  The streaming algorithm was
+    ported from upstream Ming's real-time pipeline and aggressively splits at
+    commas after only 12 tokens — this causes audible stuttering when the
+    resulting segments are independently generated and concatenated in batch
+    mode.  ``cut_text_by_semantic_length`` respects the *max_length* limit
+    and only splits when the text actually exceeds it, producing fewer and
+    larger segments at natural sentence boundaries (。！？).
 
-    TalkerTN (pynini-based Chinese/English normalizer) is not yet ported;
-    when available it would run after ``normalize_numbers``.
+    Pipeline:
+      1. Semantic-length-aware segmentation (split only when > max_length)
+      2. Per-fragment normalization (English number expansion)
     """
     if not text or not text.strip():
         return []
 
-    segments = detect_sentence_boundaries(text, max_length=max_length)
+    segments = cut_text_by_semantic_length(text.strip(), max_length)
 
     normalized: list[str] = []
     for seg in segments:
         if not is_chinese(seg):
             seg = normalize_numbers(seg)
-        # TalkerTN.normalize would run here if ported
         if seg and seg[0] == "，":
             seg = seg[1:]
         seg = seg.strip()

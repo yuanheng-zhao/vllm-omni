@@ -307,13 +307,23 @@ class MingFlashOmniTalkerForConditionalGeneration(nn.Module, CustomProcessMixin)
         return self._spkemb_extractor
 
     @torch.no_grad()
+    def _resample(self, waveform: torch.Tensor, orig_sr: int, target_sr: int) -> torch.Tensor:
+        """Resample waveform using linear interpolation (no torchaudio needed)."""
+        if orig_sr == target_sr:
+            return waveform
+        ratio = target_sr / orig_sr
+        new_len = int(waveform.shape[-1] * ratio)
+        return torch.nn.functional.interpolate(
+            waveform.unsqueeze(0), size=new_len, mode="linear", align_corners=False,
+        ).squeeze(0)
+
     def register_prompt_wav(self, voice_name: str, prompt_wav_path: str | list[str]) -> None:
         """Register a voice preset from reference wav file(s).
 
         Extracts and caches spk_emb, prompt_wav_lat, and prompt_wav_emb
         for reuse across requests.
         """
-        import torchaudio
+        import soundfile as sf
 
         if isinstance(prompt_wav_path, str):
             prompt_wav_path = [prompt_wav_path]
@@ -324,15 +334,17 @@ class MingFlashOmniTalkerForConditionalGeneration(nn.Module, CustomProcessMixin)
         speech_chunks = []
         spk_emb_list = []
         for wav_path in prompt_wav_path:
-            speech_tmp, sample_rate = torchaudio.load(wav_path, backend="soundfile")
-            speech_for_vae = speech_tmp.clone()
-            if sample_rate != vae_sr:
-                speech_for_vae = torchaudio.transforms.Resample(sample_rate, vae_sr)(speech_for_vae)
+            data, sample_rate = sf.read(wav_path, dtype="float32")
+            speech_tmp = torch.from_numpy(data)
+            if speech_tmp.ndim == 1:
+                speech_tmp = speech_tmp.unsqueeze(0)
+            else:
+                speech_tmp = speech_tmp.T
+
+            speech_for_vae = self._resample(speech_tmp, sample_rate, vae_sr)
             speech_chunks.append(speech_for_vae)
 
-            speech_for_spk = speech_tmp.clone()
-            if sample_rate != 16000:
-                speech_for_spk = torchaudio.transforms.Resample(sample_rate, 16000)(speech_for_spk)
+            speech_for_spk = self._resample(speech_tmp, sample_rate, 16000)
             raw_emb = extractor(speech_for_spk)
             se = self.spk_head(raw_emb.to(device=self.device, dtype=self.dtype))
             spk_emb_list.append(se)
@@ -983,8 +995,6 @@ class MingFlashOmniTalkerForConditionalGeneration(nn.Module, CustomProcessMixin)
                     use_static_cache=use_static_cache,
                 )
                 all_segment_latents.extend(segment_latents)
-                prompt_wav_lat = None
-                prompt_wav_emb = None
             latents = all_segment_latents
         else:
             latents = self.generate_audio(
