@@ -399,7 +399,7 @@ class MingFlashOmniTalkerForConditionalGeneration(nn.Module, CustomProcessMixin)
             path = os.path.join(candidate, "data", "voice_name.json")
             if os.path.isfile(path):
                 voice_json_path = path
-                base_dir = os.path.dirname(voice_json_path)
+                base_dir = candidate
                 break
 
         # HF hub fallback: download voice_name.json + all voice wav files
