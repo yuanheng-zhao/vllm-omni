@@ -119,7 +119,13 @@ class DiffusionEngine:
         logger.info("Generation completed successfully.")
 
         if output.output is None:
-            logger.warning("Output is None, returning empty OmniRequestOutput")
+            # When a downstream stage owns the final decode (see #2089 split
+            # VAE), the pipeline returns output=None and attaches payload via
+            # custom_output. Forward custom_output / stage_durations so the
+            # orchestrator's per-stage engine_outputs carry the bridge data.
+            custom_output = output.custom_output or None
+            if not custom_output:
+                logger.warning("Output is None, returning empty OmniRequestOutput")
             return [
                 OmniRequestOutput.from_diffusion(
                     request_id=request.request_ids[i] if i < len(request.request_ids) else "",
@@ -127,6 +133,8 @@ class DiffusionEngine:
                     prompt=prompt,
                     metrics={},
                     latents=None,
+                    custom_output=custom_output,
+                    stage_durations=output.stage_durations,
                 )
                 for i, prompt in enumerate(request.prompts)
             ]

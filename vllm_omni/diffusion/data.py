@@ -508,6 +508,12 @@ class OmniDiffusionConfig:
     # Maximum number of sequences to generate in a batch
     max_num_seqs: int = 1
 
+    # When true, the pipeline skips its local VAE decode and emits packed
+    # latents via DiffusionOutput.custom_output["remote_vae_payload"] for a
+    # downstream VAE stage to consume (RFC #2089).  Set in the diffusion
+    # stage's engine_args in pipeline.yaml.
+    remote_vae: bool = False
+
     @property
     def is_moe(self) -> bool:
         num_experts = self.tf_model_config.get("num_experts", None)
