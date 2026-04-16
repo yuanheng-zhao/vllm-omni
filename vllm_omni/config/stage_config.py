@@ -10,6 +10,7 @@ Runtime parameters (gpu_memory_utilization, tp_size, etc.) come from CLI.
 
 from __future__ import annotations
 
+import os
 import re
 import warnings
 from dataclasses import asdict, dataclass, field
@@ -46,6 +47,10 @@ class StageType(str, Enum):
 
     LLM = "llm"
     DIFFUSION = "diffusion"
+    # Auxiliary stage hosting a single module (VAE, text encoder, image
+    # encoder, ...).  First concrete use: VAE decode offloaded to a dedicated
+    # subprocess so it no longer shares VRAM with the denoiser (see #2089).
+    VAE = "vae"
 
 
 @dataclass
@@ -365,6 +370,29 @@ class StageConfigFactory:
             return None
 
         pipeline_dir = cls.PIPELINE_MODELS.get(model_type)
+
+        # Deprecated: VLLM_OMNI_USE_SPLIT_VAE used to opt-in to the
+        # multi-stage Qwen-Image pipeline.  The split topology is now
+        # selected by the authoritative pipeline.yaml (with
+        # engine_args.remote_vae: true on the diffusion stage).  The env
+        # var remains as a transitional fallback for one release — it
+        # just routes the Qwen-Image model to that same yaml.
+        if (
+            pipeline_dir is None
+            and os.environ.get("VLLM_OMNI_USE_SPLIT_VAE") == "1"
+            and hf_config is not None
+            and any("QwenImage" in a for a in getattr(hf_config, "architectures", []) or [])
+        ):
+            warnings.warn(
+                "VLLM_OMNI_USE_SPLIT_VAE is deprecated and will be removed in a "
+                "future release. Select the split-VAE topology by pointing to a "
+                "pipeline.yaml whose diffusion stage sets `engine_args.remote_vae: "
+                "true` (see vllm_omni/model_executor/models/qwen_image/pipeline.yaml).",
+                DeprecationWarning,
+                stacklevel=2,
+            )
+            pipeline_dir = "qwen_image"
+            model_type = "qwen_image"
 
         # Fallback: check HF architectures when model_type doesn't match
         if pipeline_dir is None and hf_config is not None:
