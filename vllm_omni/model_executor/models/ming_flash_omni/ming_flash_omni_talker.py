@@ -604,12 +604,13 @@ class MingFlashOmniTalkerForConditionalGeneration(nn.Module, CustomProcessMixin)
         temperature: float = 0.0,
         use_static_cache: bool = True,
     ) -> list[torch.Tensor]:
+        """Autoregressive generation loop: LLM + CFM -> audio latents.
+
+        Returns:
+            list of generated latent tensors, each (1, patch_size, latent_dim).
+        """
         if cfg is None:
             cfg = self.cfg_strength
-        """Autoregressive generation loop: LLM + CFM → audio latents.
-
-        Returns list of generated latent tensors, each (1, patch_size, latent_dim).
-        """
         # Initialize latent history
         his_lat = torch.zeros(1, self.his_patch_size, self.latent_dim, device=self.device, dtype=self.dtype)
         if prompt_wav_lat is not None:

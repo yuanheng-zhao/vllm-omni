@@ -119,9 +119,8 @@ class CFMGraphExecutorPool:
     def execute(self, input_tensor, his_lat, cfg_strength=2.0, sigma=0.25, temperature=0.0):
         executor = self.acquire()
         try:
-            gen_lat, inputs_embeds, stop_out = executor.execute(
+            return executor.execute(
                 input_tensor, his_lat, cfg_strength=cfg_strength, sigma=sigma, temperature=temperature
             )
         finally:
             self.release(executor)
-            return gen_lat, inputs_embeds, stop_out

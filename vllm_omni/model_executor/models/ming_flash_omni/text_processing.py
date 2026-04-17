@@ -323,7 +323,7 @@ _percent_number_re = re.compile(r"(-?[0-9.,]*[0-9]+)%")
 _pounds_re = re.compile(r"£(-?[0-9,]*[0-9]+(?:\.[0-9]+)?)")
 _dollars_re = re.compile(r"\$(-?[0-9.,]*[0-9]+(?:\.[0-9]+)?)")
 _fraction_re = re.compile(r"([0-9]+)\/([0-9]+)")
-_ordinal_re = re.compile(r"\b[0-9]+(st|and|rd|th)\b")
+_ordinal_re = re.compile(r"\b[0-9]+(st|[nr]d|th)\b")
 _number_re = re.compile(r"\b-?[0-9]+(?:\.[0-9]+)?\b")
 _unit_re = re.compile(
     r"\b(-?\d+(?:\.\d+)?)\s*"
