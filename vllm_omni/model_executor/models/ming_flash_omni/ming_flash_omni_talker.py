@@ -314,7 +314,10 @@ class MingFlashOmniTalkerForConditionalGeneration(nn.Module, CustomProcessMixin)
         ratio = target_sr / orig_sr
         new_len = int(waveform.shape[-1] * ratio)
         return torch.nn.functional.interpolate(
-            waveform.unsqueeze(0), size=new_len, mode="linear", align_corners=False,
+            waveform.unsqueeze(0),
+            size=new_len,
+            mode="linear",
+            align_corners=False,
         ).squeeze(0)
 
     def register_prompt_wav(self, voice_name: str, prompt_wav_path: str | list[str]) -> None:
@@ -378,24 +381,6 @@ class MingFlashOmniTalkerForConditionalGeneration(nn.Module, CustomProcessMixin)
             "spk_emb": spk_emb_list,
         }
         logger.info("Registered voice preset '%s' from %s", voice_name, prompt_wav_path)
-
-    def get_prompt_emb(
-        self,
-        voice_name: str | None,
-        use_spk_emb: bool = False,
-        use_zero_spk_emb: bool = False,
-    ) -> tuple[torch.Tensor | None, torch.Tensor | None, list[torch.Tensor] | None]:
-        """Look up a registered voice preset.
-
-        Returns (prompt_wav_lat, prompt_wav_emb, spk_emb).
-        """
-        if voice_name is None or voice_name not in self.registered_prompts:
-            if not use_zero_spk_emb:
-                return None, None, None
-            return None, None, [torch.zeros(1, self.hidden_size, device=self.device, dtype=self.dtype)]
-        preset = self.registered_prompts[voice_name]
-        spk_emb = preset["spk_emb"] if use_spk_emb else None
-        return preset["prompt_wav_lat"], preset["prompt_wav_emb"], spk_emb
 
     def _load_voice_presets(self) -> None:
         """Load voice_name.json and register all voice presets.

@@ -5,8 +5,6 @@
 
 import torch
 import torch.nn as nn
-
-# from .rope import RotaryEmbedding
 from x_transformers.x_transformers import RotaryEmbedding
 
 from .modules import DiTBlock, FinalLayer
@@ -54,26 +52,4 @@ class Aggregator(nn.Module):
             x = block(x, mask, rope)
         x = self.final_layer(x)
         x = x[:, :1, :]
-        return x
-
-
-class PoolAgg(nn.Module):
-    def __init__(self, in_channels=64, llm_input_dim=896):
-        super().__init__()
-        self.final_layer = FinalLayer(in_channels, llm_input_dim)
-
-    def forward(self, x, mask=None):
-        x = self.final_layer(x)
-        x = x.mean(dim=1, keepdim=True)
-        return x
-
-
-class AggLinear(nn.Module):
-    def __init__(self, in_channels=64, llm_input_dim=896):
-        super().__init__()
-        self.fc = nn.Linear(in_channels, llm_input_dim)
-
-    def forward(self, x, mask=None):
-        x = x.mean(dim=1, keepdim=True)
-        x = self.fc(x)
         return x
