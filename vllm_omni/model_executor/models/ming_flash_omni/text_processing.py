@@ -9,22 +9,7 @@
 #
 #     http://www.apache.org/licenses/LICENSE-2.0
 
-"""Text segmentation and normalization for Ming TTS.
-
-Upstream Ming applies a multi-step text processing pipeline before
-passing each segment to the talker's LLM + CFM generation loop:
-
-  raw text
-    → tokenize_mixed_text_iterator   (word/CJK-char tokenization)
-    → streaming sentence boundary detection
-    → cut_text_by_semantic_length    (clause-aware segmentation)
-    → per-fragment: normalize_numbers (English) + TalkerTN (Chinese/English)
-    → tts_job per fragment
-
-This module ports the first three steps plus English number normalization.
-TalkerTN (pynini FST-based) is not yet ported — see
-TALKER_IMPLEMENTATION.md limitation #4.
-"""
+"""Text segmentation and normalization utilities for Ming TTS."""
 
 from __future__ import annotations
 
@@ -35,10 +20,8 @@ from vllm.logger import init_logger
 
 logger = init_logger(__name__)
 
-# ---------------------------------------------------------------------------
-# tokenize_mixed_text_iterator  (from front/toolkit.py)
-# ---------------------------------------------------------------------------
-
+# Ported from
+# https://github.com/inclusionAI/Ming/blob/e58533db227031990c5a6864dcf5f08fb53ed0d2/front/toolkit.py
 _TOKENIZE_PATTERN = re.compile(r"(?:[a-zA-Z]\.)+|[a-zA-Z]+(?:['\-][a-zA-Z]+)*|\d+(?:\.\d+)?|[\u4e00-\u9fff]|\s+|\S")
 
 
@@ -51,11 +34,8 @@ def tokenize_mixed_text_iterator(text: str):
         yield match.group(0)
 
 
-# ---------------------------------------------------------------------------
-# Helpers  (from front/text_segment_cut.py)
-# ---------------------------------------------------------------------------
-
-
+# Ported from
+# https://github.com/inclusionAI/Ming/blob/e58533db227031990c5a6864dcf5f08fb53ed0d2/front/text_segment_cut.py
 def is_chinese(text: str) -> bool:
     return bool(re.search(r"[\u4e00-\u9fff]", text))
 
@@ -129,10 +109,6 @@ def split_long_fragment(text_fragment: str, max_len: int) -> list[str]:
         fragments.append(current_fragment)
     return fragments
 
-
-# ---------------------------------------------------------------------------
-# cut_text_by_semantic_length  (from front/text_segment_cut.py)
-# ---------------------------------------------------------------------------
 
 _DOT_PLACEHOLDER = "##DOT##"
 
@@ -242,9 +218,7 @@ def cut_text_by_semantic_length(
     return [f.replace(_DOT_PLACEHOLDER, ".") for f in result_fragments]
 
 
-# ---------------------------------------------------------------------------
-# Streaming sentence boundary detection  (from modeling_bailing_talker.py)
-# ---------------------------------------------------------------------------
+# Streaming sentence boundary detection
 
 _RE_CJK = re.compile(r"[\u4e00-\u9fff]")
 _RE_DIGIT_LAST = re.compile(r"[0-9]")
@@ -256,9 +230,8 @@ def detect_sentence_boundaries(
 ) -> list[str]:
     """Accumulate tokens and flush at sentence boundaries.
 
-    Faithfully ports the streaming sentence detection loop from upstream
-    ``omni_audio_generation`` / ``instruct_audio_generation`` (TTS branch),
-    but operates on the full text since we have it available upfront.
+    Ported from the streaming sentence detection loop from the Ming repo
+    TTS branch, but operates on the full text since we have it available upfront.
     """
     sentences: list[str] = []
     streaming_text: list[str] = []
@@ -321,9 +294,9 @@ def detect_sentence_boundaries(
     return sentences
 
 
-# ---------------------------------------------------------------------------
-# normalize_numbers  (from front/number_en.py — requires `inflect`)
-# ---------------------------------------------------------------------------
+# number normalization for English. Ported from
+# https://github.com/inclusionAI/Ming/blob/e58533db227031990c5a6864dcf5f08fb53ed0d2/front/number_en.py
+
 
 _inflect_engine = None
 
@@ -338,7 +311,7 @@ def _get_inflect():
         _inflect_engine = inflect.engine()
     except ImportError:
         logger.warning(
-            "Package 'inflect' not installed — English number normalization "
+            "Package 'inflect' not installed - English number normalization "
             "will be skipped.  Install with: pip install inflect"
         )
         _inflect_engine = None
@@ -510,8 +483,7 @@ def _expand_version(m: re.Match) -> str:
 def normalize_numbers(text: str) -> str:
     """Expand English numbers, currencies, units, etc. to words.
 
-    Requires the ``inflect`` package.  If not installed, returns text
-    unchanged and logs a warning on first call.
+    Returns text unchanged if `inflect` package is not installed.
     """
     if _get_inflect() is None:
         return text
@@ -528,29 +500,19 @@ def normalize_numbers(text: str) -> str:
     return text.strip()
 
 
-# ---------------------------------------------------------------------------
-# Top-level API: segment_and_normalize
-# ---------------------------------------------------------------------------
+# Top-level API
 
 
 def segment_and_normalize(
     text: str,
     max_length: int = 50,
 ) -> list[str]:
-    """Text processing pipeline for Ming TTS (batch mode).
+    """Segment text into fragments and expand English numbers for Ming TTS.
 
-    Uses ``cut_text_by_semantic_length`` directly rather than the streaming
-    ``detect_sentence_boundaries`` algorithm.  The streaming algorithm was
-    ported from upstream Ming's real-time pipeline and aggressively splits at
-    commas after only 12 tokens — this causes audible stuttering when the
-    resulting segments are independently generated and concatenated in batch
-    mode.  ``cut_text_by_semantic_length`` respects the *max_length* limit
-    and only splits when the text actually exceeds it, producing fewer and
-    larger segments at natural sentence boundaries (。！？).
-
-    Pipeline:
-      1. Semantic-length-aware segmentation (split only when > max_length)
-      2. Per-fragment normalization (English number expansion)
+    This function cuts text by semantic length directly rather than following
+    the streaming algorithm to detect sentence boundaries in the upstream
+    Ming repo (which is more aggressively splitting at commas). It produces
+    fewer and larger segments at natural sentence boundaries.
     """
     if not text or not text.strip():
         return []

@@ -440,9 +440,9 @@ class MingFlashOmniTalkerForConditionalGeneration(nn.Module, CustomProcessMixin)
                 logger.warning("Failed to register voice preset '%s': %s", name, e)
 
     def _cfm_sample_step(self, last_hidden_state, his_lat, cfg=None, sigma=0.25, temperature=0.0):
+        """Run one CFM sampling step: LLM hidden -> audio latent + next embedding + stop."""
         if cfg is None:
             cfg = self.cfg_strength
-        """Run one CFM sampling step: LLM hidden → audio latent + next embedding + stop."""
         sampler_pool = self._get_sampler_pool()
         if sampler_pool is not None:
             return sampler_pool.execute(last_hidden_state, his_lat, cfg, sigma, temperature)
@@ -467,12 +467,6 @@ class MingFlashOmniTalkerForConditionalGeneration(nn.Module, CustomProcessMixin)
 
     @staticmethod
     def _segment_text(text: str, max_length: int = 50) -> list[str]:
-        """Segment and normalize text using the upstream Ming pipeline.
-
-        Uses ``segment_and_normalize`` which ports the full upstream flow:
-        tokenize_mixed_text_iterator → streaming sentence boundary detection
-        → cut_text_by_semantic_length → per-fragment normalize_numbers.
-        """
         from .text_processing import segment_and_normalize
 
         return segment_and_normalize(text, max_length=max_length)
@@ -824,15 +818,6 @@ class MingFlashOmniTalkerForConditionalGeneration(nn.Module, CustomProcessMixin)
         self,
         num_reqs: int,
     ) -> list[dict[str, object]]:
-        """Provide dummy inputs for the warmup/profiling dummy run.
-
-        Without this, the dummy run passes empty text and 1D input_ids,
-        producing 2D inputs_embeds that the transformers Qwen2Model
-        cannot handle (it expects 3D batch×seq×hidden).  Providing a
-        short text string causes build_tts_input to tokenize it and
-        produce correctly-shaped 3D embeddings.  max_steps=1 keeps the
-        AR loop to a single iteration so profiling is fast.
-        """
         info: dict[str, object] = {
             "text": "dummy",
             "use_zero_spk_emb": True,
@@ -845,8 +830,6 @@ class MingFlashOmniTalkerForConditionalGeneration(nn.Module, CustomProcessMixin)
         hidden_states: torch.Tensor,
         sampling_metadata=None,
     ) -> torch.Tensor | None:
-        # Talker does not produce text logits; generation is handled
-        # entirely inside forward() via the CFM sampling loop.
         return None
 
     def sample(
@@ -854,8 +837,6 @@ class MingFlashOmniTalkerForConditionalGeneration(nn.Module, CustomProcessMixin)
         logits: torch.Tensor,
         sampling_metadata,
     ):
-        # Not applicable — the talker's autoregressive loop is custom
-        # (LLM + CFM), not standard token sampling.
         return None
 
     def embed_input_ids(
@@ -875,27 +856,18 @@ class MingFlashOmniTalkerForConditionalGeneration(nn.Module, CustomProcessMixin)
         runtime_additional_information: list[dict] | None = None,
         **kwargs,
     ) -> OmniOutput:
-        """Forward pass: run TTS generation and return audio output.
+        """Run TTS generation and return audio output.
 
-        For the talker, the full autoregressive generation loop is executed
-        inside forward() since it's not standard AR token generation.
-
-        runtime_additional_information is a list of per-request dicts
-        populated by the GPUGenerationModelRunner from
-        OmniTokensPrompt.additional_information.
+        For the talker, the full autoregressive generation loop is
+        executed inside forward method.
         """
-        # GPUGenerationModelRunner passes per-request info as a list;
-        # take the first entry (batch_size=1).
         if runtime_additional_information and len(runtime_additional_information) > 0:
             additional_info = runtime_additional_information[0] or {}
         else:
             additional_info = {}
 
-        # ming_task selects which upstream Ming API this request mirrors:
-        #  "omni"     -> omni_audio_generation (thinker → talker hand-off,
-        #                hardcoded prompt + instruction=None, voice preset)
-        #  "instruct" -> instruct_audio_generation (TTS, caller-supplied
-        #                prompt + instruction caption JSON + sampling knobs)
+        # "omni"    : thinker -> talker hand-off with hardcoded defaults
+        # "instruct": standalone TTS with caller-supplied sampling knobs
         ming_task = additional_info.get("ming_task", "instruct")
 
         text = additional_info.get("text", "")
@@ -937,12 +909,11 @@ class MingFlashOmniTalkerForConditionalGeneration(nn.Module, CustomProcessMixin)
         stream_decode = bool(additional_info.get("stream_decode", True))
 
         if inputs_embeds is None:
-            # Process speaker embedding through spk_head once and reuse across fragments.
-            # Preset-resolved embeddings are already projected; raw CAMPPlus
-            # embeddings (192-dim) from the request need spk_head projection.
+            # Process speaker embedding through spk_head once and reuse across segments.
             processed_spk_emb = None
             if spk_emb is not None:
                 if spk_emb_already_projected:
+                    # Preset-resolved embeddings are already projected
                     processed_spk_emb = spk_emb if isinstance(spk_emb, list) else [spk_emb]
                 elif isinstance(spk_emb, list):
                     processed_spk_emb = [self.spk_head(se.to(device=self.device, dtype=self.dtype)) for se in spk_emb]
@@ -953,8 +924,7 @@ class MingFlashOmniTalkerForConditionalGeneration(nn.Module, CustomProcessMixin)
 
             text_segments = self._segment_text(text, max_length=max_text_length) if text else []
             if not text_segments:
-                # Fallback: use input_ids directly. vLLM passes 1D input_ids (num_tokens,),
-                # while Qwen2Model expects (batch, seq_len, hidden_size).
+                # vLLM passes 1D input_ids (num_tokens,) while Qwen2Model expects (batch, seq_len, hidden_size)
                 inputs_embeds = self.model.get_input_embeddings()(input_ids.to(self.device)).unsqueeze(0)
                 text_segments = [""]
 
