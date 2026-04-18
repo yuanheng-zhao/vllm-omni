@@ -27,19 +27,16 @@ class FusedBlock(nn.Module):
         self,
         vid_block: nn.Module,
         audio_block: nn.Module,
-        attn: Attention,
         device: torch.device,
     ):
         super().__init__()
         self.vid_block = vid_block
         self.audio_block = audio_block
-        # `attn` is not registered as submodules, but shared across all FusedBlocks
-        # and stay GPU-resident as direct children of FusionModel.
-        self._attn = attn
-        self._device = device
+        self.device = device
 
     def _cross_attention_forward(
         self,
+        attn: Attention,
         cross_attn_block,
         src_seq,
         src_grid_sizes,
@@ -62,10 +59,10 @@ class FusedBlock(nn.Module):
             q, k, v = cross_attn_block.qkv_fn(src_seq, context)
             k_img = v_img = None
 
-        x = self._attn(q, k, v)
+        x = attn(q, k, v)
 
         if k_img is not None:
-            img_x = self._attn(q, k_img, v_img)
+            img_x = attn(q, k_img, v_img)
             x = x + img_x
 
         target_seq = cross_attn_block.pre_attn_norm_fusion(target_seq)
@@ -81,7 +78,7 @@ class FusedBlock(nn.Module):
             freqs_scaling=target_freqs_scaling,
         )
 
-        target_x = self._attn(q, k_target, v_target)
+        target_x = attn(q, k_target, v_target)
 
         x = x + target_x
         x = x.flatten(2)
@@ -90,6 +87,7 @@ class FusedBlock(nn.Module):
 
     def _cross_attention_ffn_forward(
         self,
+        attn: Attention,
         attn_block,
         src_seq,
         src_grid_sizes,
@@ -107,6 +105,7 @@ class FusedBlock(nn.Module):
         target_freqs_scaling=None,
     ):
         src_seq = src_seq + self._cross_attention_forward(
+            attn,
             attn_block.cross_attn,
             attn_block.norm3(src_seq),
             src_grid_sizes=src_grid_sizes,
@@ -123,7 +122,7 @@ class FusedBlock(nn.Module):
             target_freqs_scaling=target_freqs_scaling,
         )
         y = attn_block.ffn(attn_block.norm2(src_seq).bfloat16() * (1 + src_e[4].squeeze(2)) + src_e[3].squeeze(2))
-        with torch.autocast(device_type=self._device.type, dtype=torch.bfloat16, enabled=True):
+        with torch.autocast(device_type=self.device.type, dtype=torch.bfloat16, enabled=True):
             src_seq = src_seq + y * src_e[5].squeeze(2)
         return src_seq
 
@@ -131,6 +130,7 @@ class FusedBlock(nn.Module):
         self,
         vid,
         audio,
+        attn: Attention,
         vid_e,
         vid_seq_lens,
         vid_grid_sizes,
@@ -156,7 +156,7 @@ class FusedBlock(nn.Module):
         assert len(audio_e.shape) == 4 and audio_e.size(2) == 6 and audio_e.shape[1] == audio.shape[1], (
             f"{audio_e.shape}, {audio.shape}"
         )
-        with torch.autocast(device_type=self._device.type, dtype=torch.bfloat16, enabled=True):
+        with torch.autocast(device_type=self.device.type, dtype=torch.bfloat16, enabled=True):
             audio_e = audio_block.modulation(audio_e).chunk(6, dim=2)
         assert audio_e[0].dtype == torch.bfloat16
 
@@ -169,14 +169,14 @@ class FusedBlock(nn.Module):
             ref_lengths=audio_ref_lengths,
             freqs_scaling=audio_freqs_scaling,
         )
-        with torch.autocast(device_type=self._device.type, dtype=torch.bfloat16, enabled=True):
+        with torch.autocast(device_type=self.device.type, dtype=torch.bfloat16, enabled=True):
             audio = audio + audio_y * audio_e[2].squeeze(2)
 
         ## video modulation
         assert len(vid_e.shape) == 4 and vid_e.size(2) == 6 and vid_e.shape[1] == vid.shape[1], (
             f"{vid_e.shape}, {vid.shape}"
         )
-        with torch.autocast(device_type=self._device.type, dtype=torch.bfloat16, enabled=True):
+        with torch.autocast(device_type=self.device.type, dtype=torch.bfloat16, enabled=True):
             vid_e = vid_block.modulation(vid_e).chunk(6, dim=2)
 
         # video self-attention
@@ -188,13 +188,14 @@ class FusedBlock(nn.Module):
             ref_lengths=vid_ref_lengths,
         )
 
-        with torch.autocast(device_type=self._device.type, dtype=torch.bfloat16, enabled=True):
+        with torch.autocast(device_type=self.device.type, dtype=torch.bfloat16, enabled=True):
             vid = vid + vid_y * vid_e[2].squeeze(2)
 
         og_audio = audio
 
         # audio cross-attention
         audio = self._cross_attention_ffn_forward(
+            attn,
             audio_block,
             audio,
             audio_grid_sizes,
@@ -216,6 +217,7 @@ class FusedBlock(nn.Module):
 
         # video cross-attention
         vid = self._cross_attention_ffn_forward(
+            attn,
             vid_block,
             vid,
             vid_grid_sizes,
@@ -243,6 +245,7 @@ class FusionModel(nn.Module):
         super().__init__()
         has_video = True
         has_audio = True
+        self.device = get_local_device()
         if video_config is not None:
             self.video_model = WanModel(**video_config)
         else:
@@ -262,10 +265,10 @@ class FusionModel(nn.Module):
             self.num_blocks = len(self.video_model.blocks)
 
             self.inject_cross_attention_kv_projections()
-        self.device = get_local_device()
 
         self.num_heads = self.video_model.num_heads
         self.head_dim = self.video_model.dim // self.video_model.num_heads
+        # Make a single shared instance to pass in at forward time
         self.attn = Attention(
             num_heads=self.num_heads,
             head_size=self.head_dim,
@@ -274,20 +277,17 @@ class FusionModel(nn.Module):
             causal=False,
         )
 
-        # NOTE: `attn` is a single shared instance across blocks
         if has_video and has_audio:
             self.fused_blocks = nn.ModuleList(
                 [
                     FusedBlock(
                         self.video_model.blocks[i],
                         self.audio_model.blocks[i],
-                        self.attn,
                         self.device,
                     )
                     for i in range(self.num_blocks)
                 ]
             )
-        self._blocks_detached_from_backbones = False
 
     def load_state_dict(self, state_dict, strict=True, assign=False):
         """Remap checkpoints where blocks are stored under
@@ -298,24 +298,14 @@ class FusionModel(nn.Module):
         if needs_remap:
             remapped = {}
             for k, v in state_dict.items():
-                remapped[k] = v
                 new_k = re.sub(r"^video_model\.blocks\.(\d+)\.", r"fused_blocks.\1.vid_block.", k)
-                if new_k != k:
-                    remapped[new_k] = v
-                    if self._blocks_detached_from_backbones:
-                        remapped.pop(k, None)
-                    continue
-                new_k = re.sub(r"^audio_model\.blocks\.(\d+)\.", r"fused_blocks.\1.audio_block.", k)
-                if new_k != k:
-                    remapped[new_k] = v
-                    if self._blocks_detached_from_backbones:
-                        remapped.pop(k, None)
+                new_k = re.sub(r"^audio_model\.blocks\.(\d+)\.", r"fused_blocks.\1.audio_block.", new_k)
+                remapped[new_k] = v
             state_dict = remapped
-        result = super().load_state_dict(state_dict, strict=strict, assign=assign)
-        if not self._blocks_detached_from_backbones:
-            self._detach_blocks_from_backbones()
 
-        return result
+        self._detach_blocks_from_backbones()
+
+        return super().load_state_dict(state_dict, strict=strict, assign=assign)
 
     def inject_cross_attention_kv_projections(self):
         for vid_block in self.video_model.blocks:
@@ -345,17 +335,12 @@ class FusionModel(nn.Module):
         other modules onto device, including the same blocks owned by both
         `fused_blocks` and `video_model` and `audio_model`.
         """
-        if self._blocks_detached_from_backbones:
-            return
-
         video_blocks = list(self.video_model.blocks)
         audio_blocks = list(self.audio_model.blocks)
         self.video_model._modules.pop("blocks", None)
         self.audio_model._modules.pop("blocks", None)
         self.video_model.blocks = tuple(video_blocks)
         self.audio_model.blocks = tuple(audio_blocks)
-
-        self._blocks_detached_from_backbones = True
 
     def merge_kwargs(self, vid_kwargs, audio_kwargs):
         """
@@ -404,7 +389,7 @@ class FusionModel(nn.Module):
         kwargs = self.merge_kwargs(vid_kwargs, audio_kwargs)
 
         for fused_block in self.fused_blocks:
-            vid, audio = fused_block(vid, audio, **kwargs)
+            vid, audio = fused_block(vid, audio, self.attn, **kwargs)
 
         vid = self.video_model.post_transformer_block_out(vid, vid_kwargs["grid_sizes"], vid_e)
         audio = self.audio_model.post_transformer_block_out(audio, audio_kwargs["grid_sizes"], audio_e)
