@@ -1,10 +1,25 @@
 # Ming-flash-omni 2.0
 
-[Ming-flash-omni-2.0](https://github.com/inclusionAI/Ming) is an omni-modal model supporting text, image, video, and audio understanding, with outputs in text, image, and audio. For now, Ming-flash-omni-2.0 in vLLM-Omni is supported with thinker stage (multi-modal understanding).
+[Ming-flash-omni-2.0](https://github.com/inclusionAI/Ming) is an omni-modal model supporting text, image, video, and audio understanding, with text and speech outputs.
+
+vLLM-Omni supports two deployment modes:
+
+| Mode | Stage config | Output |
+|------|-------------|--------|
+| Thinker only (multimodal understanding) | `ming_flash_omni_thinker.yaml` (default `--omni`) | Text |
+| Thinker + Talker (omni-speech) | `ming_flash_omni.yaml` | Text + Audio |
+
+For standalone TTS (talker only), see [`examples/offline_inference/ming_flash_omni_tts/`](../ming_flash_omni_tts/).
 
 ## Setup
 
 Please refer to the [stage configuration documentation](https://docs.vllm.ai/projects/vllm-omni/en/latest/configuration/stage_configs/) to configure memory allocation appropriately for your hardware setup.
+
+The default `--omni` flag runs thinker only.  For omni-speech, pass the two-stage config explicitly:
+
+```bash
+--stage-configs-path vllm_omni/model_executor/stage_configs/ming_flash_omni.yaml
+```
 
 ## Run examples
 
@@ -57,13 +72,40 @@ python examples/offline_inference/ming_flash_omni/end2end.py --query-type use_mi
 
 If media file paths are not provided, the script uses built-in default assets.
 
-### Modality control
-To control output modalities (e.g. text-only output):
+### Omni-speech (thinker + talker)
+
+To enable spoken output, use the two-stage config and request `audio` (or `text,audio`) modalities.
+The thinker processes your multimodal input, generates text, then the talker synthesises the response as speech.
+
+**Audio-only output** (speech response, no text):
 ```bash
-python examples/offline_inference/ming_flash_omni/end2end.py --query-type use_audio --modalities text
+python examples/offline_inference/ming_flash_omni/end2end.py \
+    --query-type text \
+    --stage-configs-path vllm_omni/model_executor/stage_configs/ming_flash_omni.yaml \
+    --modalities audio \
+    --output-dir output_ming_omni_speech
 ```
 
-*For now, only text output is supported*
+**Both text and audio output**:
+```bash
+python examples/offline_inference/ming_flash_omni/end2end.py \
+    --query-type use_audio \
+    --stage-configs-path vllm_omni/model_executor/stage_configs/ming_flash_omni.yaml \
+    --modalities text,audio \
+    --output-dir output_ming_omni_speech
+```
+
+Generated `.wav` files are saved to `--output-dir` (default `output_ming`), one per request.
+
+The stage config allocates thinker on GPUs 0–3 and talker on GPU 3 by default. Adjust `devices` in the YAML to match your hardware.
+
+### Modality control
+
+| `--modalities` | Thinker output | Talker | Saved files |
+|---------------|----------------|--------|-------------|
+| `text` (default) | Text | Not run | `<id>.txt` |
+| `audio` | Text (internal) | Runs | `<id>.wav` |
+| `text,audio` | Text | Runs | `<id>.txt` + `<id>.wav` |
 
 ### Custom stage config
 ```bash

@@ -4,12 +4,28 @@
 
 Please refer to [README.md](../../../README.md)
 
+## Deployment modes
+
+| Mode | Launch command | Output |
+|------|---------------|--------|
+| Thinker only (multimodal understanding) | `vllm serve ... --omni` | Text |
+| Thinker + Talker (omni-speech) | `vllm serve ... --omni --stage-configs-path ming_flash_omni.yaml` | Text + Audio |
+
+For standalone TTS (talker only), see [`examples/online_serving/ming_flash_omni_tts/`](../ming_flash_omni_tts/).
+
 ## Run examples (Ming-flash-omni 2.0)
 
 ### Launch the Server
 
+**Thinker only (text output):**
 ```bash
 vllm serve Jonathan1909/Ming-flash-omni-2.0 --omni --port 8091
+```
+
+**Thinker + Talker (omni-speech, text + audio output):**
+```bash
+vllm serve Jonathan1909/Ming-flash-omni-2.0 --omni --port 8091 \
+    --stage-configs-path vllm_omni/model_executor/stage_configs/ming_flash_omni.yaml
 ```
 
 If you have custom stage configs file, launch the server with command below
@@ -47,14 +63,13 @@ bash run_curl_multimodal_generation.sh use_mixed_modalities
 
 ## Modality control
 
-Ming-flash-omni 2.0 currently supports text output only (thinker stage).
+| `modalities` | Server config | Output |
+|-------------|--------------|--------|
+| `["text"]` or omitted | Thinker only | Text |
+| `["audio"]` | Thinker + Talker | Audio (speech) |
+| `["text", "audio"]` | Thinker + Talker | Text + Audio |
 
-| Modalities | Output |
-|------------|--------|
-| `["text"]` | Text only |
-| Not specified | Text only (default) |
-
-### Using curl
+### Text output (thinker only server)
 
 ```bash
 curl http://localhost:8091/v1/chat/completions \
@@ -69,7 +84,70 @@ curl http://localhost:8091/v1/chat/completions \
   }'
 ```
 
-### Using OpenAI Python SDK
+### Omni-speech output (thinker + talker server)
+
+Start the server with the two-stage config first:
+```bash
+vllm serve Jonathan1909/Ming-flash-omni-2.0 --omni --port 8091 \
+    --stage-configs-path vllm_omni/model_executor/stage_configs/ming_flash_omni.yaml
+```
+
+**Audio response via curl** (and save WAV bytes):
+```bash
+curl http://localhost:8091/v1/chat/completions \
+  -H "Content-Type: application/json" \
+  -d '{
+    "model": "Jonathan1909/Ming-flash-omni-2.0",
+    "messages": [
+      {"role": "system", "content": [{"type": "text", "text": "你是一个友好的AI助手。\n\ndetailed thinking off"}]},
+      {"role": "user", "content": "请详细介绍鹦鹉的生活习性。"}
+    ],
+    "modalities": ["audio"]
+  }' | jq -r '.choices[0].message.audio.data' | base64 -d > output_ming_omni_speech.wav
+```
+
+**Text + audio response via OpenAI Python SDK:**
+```python
+from openai import OpenAI
+
+client = OpenAI(base_url="http://localhost:8091/v1", api_key="EMPTY")
+
+response = client.chat.completions.create(
+    model="Jonathan1909/Ming-flash-omni-2.0",
+    messages=[
+        {"role": "system", "content": [{"type": "text", "text": "你是一个友好的AI助手。\n\ndetailed thinking off"}]},
+        {"role": "user", "content": "请详细介绍鹦鹉的生活习性。"},
+    ],
+    modalities=["text", "audio"],
+)
+# Text response
+print(response.choices[0].message.content)
+# Audio is returned as base64-encoded WAV in response.choices[0].message.audio
+```
+
+**Multimodal input with audio output:**
+```python
+from openai import OpenAI
+
+client = OpenAI(base_url="http://localhost:8091/v1", api_key="EMPTY")
+
+response = client.chat.completions.create(
+    model="Jonathan1909/Ming-flash-omni-2.0",
+    messages=[
+        {"role": "system", "content": [{"type": "text", "text": "你是一个友好的AI助手。\n\ndetailed thinking off"}]},
+        {
+            "role": "user",
+            "content": [
+                {"type": "image_url", "image_url": {"url": "https://vllm-public-assets.s3.us-west-2.amazonaws.com/vision_model_images/cherry_blossom.jpg"}},
+                {"type": "text", "text": "请用语音描述这幅图片。"},
+            ],
+        },
+    ],
+    modalities=["audio"],
+)
+```
+
+### Using OpenAI Python SDK (text only)
 
 ```python
 from openai import OpenAI
@@ -106,7 +184,7 @@ response = client.chat.completions.create(
             ],
         },
     ],
-    modalities=["text"],
+    modalities=["text"],  # or ["audio"] / ["text", "audio"] with the thinker+talker server
 )
 print(response.choices[0].message.content)
 ```
