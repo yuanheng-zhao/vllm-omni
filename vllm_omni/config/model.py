@@ -6,7 +6,6 @@ from vllm.config import ModelConfig
 from vllm.config.utils import config
 from vllm.logger import init_logger
 from vllm.transformers_utils.config import (
-    _CONFIG_REGISTRY,
     _uses_mrope,
     get_hf_text_config,
 )
