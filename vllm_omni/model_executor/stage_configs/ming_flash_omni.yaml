@@ -58,6 +58,9 @@ stage_args:
       enable_prefix_caching: false
       max_num_batched_tokens: 1000000
       tokenizer_subdir: talker/llm
+      # The HF repo ships BailingMM2Config (thinker-only) at root,
+      # OmniModelConfig treats that as "stage does not share outer mrope"
+      hf_config_name: talker_config
     engine_input_source: [0]
     custom_process_input_func: vllm_omni.model_executor.stage_input_processors.ming_flash_omni.thinker2talker
     final_output: true

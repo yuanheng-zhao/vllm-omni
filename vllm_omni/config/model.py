@@ -6,11 +6,8 @@ from vllm.config import ModelConfig
 from vllm.config.utils import config
 from vllm.logger import init_logger
 from vllm.transformers_utils.config import (
-    _uses_mrope,
     get_hf_text_config,
-)
-from vllm.transformers_utils.config import (
-    uses_mrope as _upstream_uses_mrope,
+    thinker_uses_mrope,
 )
 from vllm.transformers_utils.model_arch_config_convertor import (
     ModelArchConfigConvertorBase,
@@ -132,12 +129,13 @@ class OmniModelConfig(ModelConfig):
     @property
     def uses_mrope(self) -> bool:
         if self.hf_config_name is not None:
+            # talker_config/thinker_config/etc
             stage_config = getattr(self.hf_config, self.hf_config_name, None)
-            if stage_config is not None:
-                return _upstream_uses_mrope(stage_config)
-            return _uses_mrope(self.hf_config)
-        if self.model_stage != "thinker":
-            return _uses_mrope(self.hf_config)
+            if stage_config is None:
+                # Check the named sub-config's text_config directly.
+                # Handles mrope resolution of stage-specific cls
+                # (e.g., talker runs as a standalone cls)
+                return thinker_uses_mrope(self.hf_config)
         return super().uses_mrope
 
     @property

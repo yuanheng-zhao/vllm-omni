@@ -21,6 +21,10 @@ stage_args:
       enable_prefix_caching: false
       max_num_batched_tokens: 100000
       tokenizer_subdir: talker/llm
+      # NOTE: `hf_config_name` for Ming talker acts as a placeholder
+      # The HF repo ships BailingMM2Config (thinker-only) at root,
+      # OmniModelConfig treats that as "stage does not share outer mrope"
+      hf_config_name: talker_config
     final_output: true
     final_output_type: audio
     default_sampling_params:
