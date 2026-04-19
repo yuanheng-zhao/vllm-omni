@@ -1,7 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 # Copyright 2025 The vLLM-Omni team.
 # Adapted from Ming repository talker_module/modules.py
-# https://github.com/inclusionAI/Ming
+# https://github.com/inclusionAI/Ming/blob/e58533db227031990c5a6864dcf5f08fb53ed0d2/talker_module/modules.py
 
 
 import torch
@@ -11,7 +11,7 @@ from x_transformers.x_transformers import apply_rotary_pos_emb
 
 
 class RMSNorm(nn.Module):
-    def __init__(self, dim: int, eps: float):
+    def __init__(self, dim: int, eps: float = 1e-6):
         super().__init__()
         self.eps = eps
         self.weight = nn.Parameter(torch.ones(dim))
@@ -61,8 +61,8 @@ class Attention(nn.Module):
             self.q_norm = None
             self.k_norm = None
         elif qk_norm == "rms_norm":
-            self.q_norm = RMSNorm(dim_head, eps=1e-6)
-            self.k_norm = RMSNorm(dim_head, eps=1e-6)
+            self.q_norm = RMSNorm(dim_head)
+            self.k_norm = RMSNorm(dim_head)
         else:
             raise ValueError(f"Unimplemented qk_norm: {qk_norm}")
 
@@ -154,7 +154,7 @@ class DiTBlock(nn.Module):
         **kwargs,
     ):
         super().__init__()
-        self.norm1 = RMSNorm(hidden_size, eps=1e-6)
+        self.norm1 = RMSNorm(hidden_size)
         self.attn = Attention(
             dim=hidden_size,
             heads=num_heads,
@@ -164,7 +164,7 @@ class DiTBlock(nn.Module):
             pe_attn_head=pe_attn_head,
             attn_mask_enabled=attn_mask_enabled,
         )
-        self.norm2 = RMSNorm(hidden_size, eps=1e-6)
+        self.norm2 = RMSNorm(hidden_size)
         self.mlp = FeedForward(dim=hidden_size, mult=mlp_ratio, dropout=dropout, approximate="tanh")
 
     def forward(self, x, mask, rope):
@@ -178,7 +178,7 @@ class FinalLayer(nn.Module):
 
     def __init__(self, hidden_size, out_channels):
         super().__init__()
-        self.norm_final = RMSNorm(hidden_size, eps=1e-6)
+        self.norm_final = RMSNorm(hidden_size)
         self.linear = nn.Linear(hidden_size, out_channels, bias=True)
 
     def forward(self, x):

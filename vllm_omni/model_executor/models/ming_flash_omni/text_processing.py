@@ -111,16 +111,21 @@ def split_long_fragment(text_fragment: str, max_len: int) -> list[str]:
 
 
 _DOT_PLACEHOLDER = "##DOT##"
+# default soft cap on fragment length in semantic units
+_DEFAULT_MAX_SEMANTIC_LENGTH: int = 50
+# default tail length controls when a short trailing fragment is
+# merged with the previous one to avoid leaving an awkward stub.
+_DEFAULT_MIN_TAIL_LENGTH: int = 5
 
 
 def cut_text_by_semantic_length(
     text: str,
-    max_semantic_length: int = 50,
-    min_tail_length: int = 5,
+    max_semantic_length: int = _DEFAULT_MAX_SEMANTIC_LENGTH,
+    min_tail_length: int = _DEFAULT_MIN_TAIL_LENGTH,
 ) -> list[str]:
     """Segment text into fragments respecting semantic length limits.
 
-    Ported from upstream Ming's ``front/text_segment_cut.py``.
+    Ported from upstream Ming's `front/text_segment_cut.py`.
     Position tracking is omitted (not needed for non-streaming VAE decode).
     """
     if not has_valid_content(text):
@@ -224,6 +229,8 @@ _RE_CJK = re.compile(r"[\u4e00-\u9fff]")
 _RE_DIGIT_LAST = re.compile(r"[0-9]")
 
 
+# Left for reference for now
+# Alternative to `cut_text_by_semantic_length`
 def detect_sentence_boundaries(
     text: str,
     max_length: int = 50,
@@ -394,19 +401,22 @@ def _remove_commas(m: re.Match) -> str:
     return m.group(1).replace(",", "")
 
 
+_NUM_PARSE_EXC: tuple[type[BaseException], ...] = (ValueError, TypeError)
+
+
 def _expand_unit(m: re.Match) -> str:
     num_str, unit = m.group(1), m.group(2).lower()
     unit_word = _unit_mapping.get(unit, unit)
     try:
         return f" {_expand_decimal(num_str)} {unit_word} "
-    except Exception:
+    except _NUM_PARSE_EXC:
         return f" {num_str} {unit} "
 
 
 def _expand_percent(m: re.Match) -> str:
     try:
         return f" {_expand_decimal(m.group(1))} percent "
-    except Exception:
+    except _NUM_PARSE_EXC:
         return f" {m.group(1)} percent "
 
 
@@ -418,7 +428,7 @@ def _expand_dollars(m: re.Match) -> str:
         value = float(clean)
         unit = "dollar" if abs(value) == 1.0 else "dollars"
         return f" {word} {unit} "
-    except Exception:
+    except _NUM_PARSE_EXC:
         return f" {clean} dollars "
 
 
@@ -430,7 +440,7 @@ def _expand_pounds(m: re.Match) -> str:
         value = float(clean)
         unit = "pound" if abs(value) == 1.0 else "pounds"
         return f" {word} {unit} "
-    except Exception:
+    except _NUM_PARSE_EXC:
         return f" {clean} pounds "
 
 
@@ -452,7 +462,7 @@ def _expand_fraction(m: re.Match) -> str:
             return f" {p.number_to_words(num)}{plural} "
         ordinal = p.ordinal(p.number_to_words(den))
         return f" {p.number_to_words(num)} {ordinal} "
-    except Exception:
+    except _NUM_PARSE_EXC:
         return f" {m.group(1)} over {m.group(2)} "
 
 
@@ -460,14 +470,14 @@ def _expand_ordinal(m: re.Match) -> str:
     try:
         num = int(re.sub(r"(st|and|rd|th)", "", m.group(0)))
         return f" {_num_to_words(num)} "
-    except Exception:
+    except _NUM_PARSE_EXC:
         return m.group(0)
 
 
 def _expand_number(m: re.Match) -> str:
     try:
         return f" {_expand_decimal(m.group(0))} "
-    except Exception:
+    except _NUM_PARSE_EXC:
         return f" {m.group(0)} "
 
 
@@ -475,7 +485,7 @@ def _expand_version(m: re.Match) -> str:
     prefix, _, num_str = m.group(1), m.group(2), m.group(3)
     try:
         word = _expand_decimal(num_str)
-    except Exception:
+    except _NUM_PARSE_EXC:
         return m.group(0)
     return f"{prefix} {word}"
 
@@ -501,11 +511,9 @@ def normalize_numbers(text: str) -> str:
 
 
 # Top-level API
-
-
 def segment_and_normalize(
     text: str,
-    max_length: int = 50,
+    max_length: int = _DEFAULT_MAX_SEMANTIC_LENGTH,
 ) -> list[str]:
     """Segment text into fragments and expand English numbers for Ming TTS.
 

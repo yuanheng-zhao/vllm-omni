@@ -36,8 +36,8 @@ class AudioVAEConfig(PretrainedConfig):
         **kwargs,
     ):
         self.sample_rate = sample_rate
-        self.enc_kwargs = enc_kwargs
-        self.dec_kwargs = dec_kwargs
+        self.enc_kwargs = enc_kwargs or {}
+        self.dec_kwargs = dec_kwargs or {}
         self.init_method = init_method
         self.patch_size = patch_size
         super().__init__(**kwargs)
@@ -59,7 +59,7 @@ class ISTFT(nn.Module):
         self.register_buffer("window", window)
         self.buffer_len = self.win_length - self.hop_length
 
-    def __buffer_process(self, x, buffer, pad, last_chunk=False, streaming=False):
+    def _buffer_process(self, x, buffer, pad, last_chunk=False, streaming=False):
         if streaming:
             if buffer is None:
                 x = x[:, pad:]
@@ -94,7 +94,7 @@ class ISTFT(nn.Module):
             stride=(1, self.hop_length),
         )[:, 0, 0, :]
 
-        y, audio_buffer = self.__buffer_process(y, audio_buffer, pad, last_chunk=last_chunk, streaming=streaming)
+        y, audio_buffer = self._buffer_process(y, audio_buffer, pad, last_chunk=last_chunk, streaming=streaming)
 
         window_sq = self.window.square().expand(1, T, -1).transpose(1, 2)
         window_envelope = (
@@ -108,7 +108,7 @@ class ISTFT(nn.Module):
             .squeeze(0)
         )
 
-        window_envelope, window_buffer = self.__buffer_process(
+        window_envelope, window_buffer = self._buffer_process(
             window_envelope, window_buffer, pad, last_chunk=last_chunk, streaming=streaming
         )
         window_envelope = window_envelope.squeeze()
