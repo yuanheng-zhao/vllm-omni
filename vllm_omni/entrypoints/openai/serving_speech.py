@@ -854,8 +854,35 @@ class OmniOpenAIServingSpeech(OpenAIServing, AudioMixin):
         """Validate Ming-flash-omni standalone-talker request parameters."""
         if not request.input or not request.input.strip():
             return "Input text cannot be empty"
-        if request.instructions is not None and len(request.instructions) > self._max_instructions_length:
-            return f"instructions exceeds max length {self._max_instructions_length}"
+        if request.instructions is not None:
+            if not isinstance(request.instructions, str):
+                return "instructions must be a string"
+            if len(request.instructions) > self._max_instructions_length:
+                return f"instructions exceeds max length {self._max_instructions_length}"
+
+        if request.task_type is not None:
+            return "'task_type' is not supported for Ming-flash-omni TTS"
+        if request.language is not None:
+            return "'language' is not supported for Ming-flash-omni TTS (language is inferred from input text)"
+        if request.x_vector_only_mode is not None:
+            return "'x_vector_only_mode' is not supported for Ming-flash-omni TTS"
+        if request.initial_codec_chunk_frames is not None:
+            return "'initial_codec_chunk_frames' is not supported for Ming-flash-omni TTS"
+
+        # Per-request voice cloning from raw audio is not yet wired up: Ming
+        # extracts spk_emb / prompt_wav_lat / prompt_wav_emb model-side via
+        # register_prompt_wav() at engine init. For ad-hoc cloning, callers
+        # should pre-compute speaker_embedding and pass it directly.
+        if request.ref_audio is not None:
+            return (
+                "'ref_audio' is not yet supported for Ming-flash-omni TTS; "
+                "use a preset 'voice' or 'speaker_embedding' instead"
+            )
+        if request.ref_text is not None:
+            return "'ref_text' is not yet supported for Ming-flash-omni TTS"
+
+        if request.max_new_tokens is not None and request.max_new_tokens <= 0:
+            return "'max_new_tokens' must be a positive integer"
         return None
 
     def _validate_ref_audio_format(self, ref_audio: str) -> str | None:
@@ -1504,24 +1531,44 @@ class OmniOpenAIServingSpeech(OpenAIServing, AudioMixin):
     # ---- Ming-flash-omni standalone-talker (TTS) helpers ----
 
     def _build_ming_prompt(self, request: OpenAICreateSpeechRequest) -> dict[str, Any]:
+        # request.instructions accepts two forms:
+        # 1. Plain text: mapped to the caption's 风格 (style) field
+        # 2. JSON object: parsed and splatted into the caption. Unlocks
+        #       Unknown keys are dropped by `ming_create_instruction`.
         caption_fields: dict[str, Any] = {}
         if request.instructions:
-            caption_fields["风格"] = request.instructions
+            stripped = request.instructions.strip()
+            if stripped.startswith("{"):
+                try:
+                    parsed = json.loads(stripped)
+                except json.JSONDecodeError:
+                    parsed = None
+                if isinstance(parsed, dict):
+                    caption_fields.update(parsed)
+                else:
+                    caption_fields["风格"] = request.instructions
+            else:
+                caption_fields["风格"] = request.instructions
+
+        has_spk_emb = request.speaker_embedding is not None
 
         # TTS path applies ming task type `instruct`.
         # voice_name enables talker-side voice preset resolution (e.g. "DB30").
-        additional_information = {
+        additional_information: dict[str, Any] = {
             "ming_task": "instruct",
             "prompt": MING_DEFAULT_PROMPT,
             "text": request.input,
             "instruction": ming_create_instruction(caption_fields),
-            "voice_name": request.voice if request.voice else None,
-            "use_zero_spk_emb": True,
-            "max_decode_steps": 200,
+            "voice_name": request.voice or None,
+            "use_zero_spk_emb": not has_spk_emb,
+            "max_decode_steps": request.max_new_tokens or _TTS_MAX_NEW_TOKENS_MAX,
             "cfg": 2.0,
             "sigma": 0.25,
             "temperature": 0.0,
         }
+        if has_spk_emb:
+            # Passed as plain float list
+            additional_information["spk_emb"] = list(request.speaker_embedding)
         return {
             "prompt_token_ids": [0],
             "additional_information": additional_information,

@@ -916,10 +916,19 @@ class MingFlashOmniTalkerForConditionalGeneration(nn.Module, CustomProcessMixin)
                 if spk_emb_already_projected:
                     # Preset-resolved embeddings are already projected
                     processed_spk_emb = spk_emb if isinstance(spk_emb, list) else [spk_emb]
-                elif isinstance(spk_emb, list):
-                    processed_spk_emb = [self.spk_head(se.to(device=self.device, dtype=self.dtype)) for se in spk_emb]
                 else:
-                    processed_spk_emb = [self.spk_head(spk_emb.to(device=self.device, dtype=self.dtype))]
+                    # Normalize to list[Tensor]
+                    if isinstance(spk_emb, torch.Tensor):
+                        spk_emb_tensors = [spk_emb]
+                    elif isinstance(spk_emb, list) and spk_emb and isinstance(spk_emb[0], (int, float)):
+                        spk_emb_tensors = [torch.tensor(spk_emb, dtype=self.dtype).unsqueeze(0)]
+                    elif isinstance(spk_emb, list):
+                        spk_emb_tensors = spk_emb
+                    else:
+                        spk_emb_tensors = [spk_emb]
+                    processed_spk_emb = [
+                        self.spk_head(se.to(device=self.device, dtype=self.dtype)) for se in spk_emb_tensors
+                    ]
             elif use_zero_spk_emb:
                 processed_spk_emb = [torch.zeros(1, self.hidden_size, device=self.device, dtype=self.dtype)]
 
