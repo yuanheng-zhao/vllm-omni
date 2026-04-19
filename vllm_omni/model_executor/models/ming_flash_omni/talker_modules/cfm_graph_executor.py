@@ -112,9 +112,8 @@ class CFMGraphExecutorPool:
     def acquire(self):
         return self.pool.get()
 
-    def release(self, executor):
-        if isinstance(executor, CFMGraphExecutor):
-            self.pool.put(executor)
+    def release(self, executor: CFMGraphExecutor) -> None:
+        self.pool.put(executor)
 
     def execute(self, input_tensor, his_lat, cfg_strength=2.0, sigma=0.25, temperature=0.0):
         executor = self.acquire()

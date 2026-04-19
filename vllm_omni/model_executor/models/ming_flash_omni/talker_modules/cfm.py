@@ -28,7 +28,16 @@ def get_epss_timesteps(n, device, dtype):
 class CFM(nn.Module):
     """Conditional Flow Matching module for audio latent generation."""
 
-    def __init__(self, model, steps=10, sway_sampling_coef=-1):
+    def __init__(self, model: nn.Module, steps: int = 10, sway_sampling_coef: float | None = -1.0):
+        """
+        Args:
+            model: DiT used for the velocity prediction.
+            steps: number of integration steps per sample call.
+            sway_sampling_coef: coefficient used to skew the integration
+                grid towards low-noise timesteps. Defaults to -1.0 which
+                packs more steps near t=0, where prediction error is highest.
+                Set to `None` to use the linear grid as-is.
+        """
         super().__init__()
         self.model = model
         self.steps = steps
@@ -55,11 +64,9 @@ class CFM(nn.Module):
         if self.sway_sampling_coef is not None:
             t = t + self.sway_sampling_coef * (torch.cos(torch.pi / 2 * t) - 1 + t)
 
-        trajectory = [y0]
         for step in range(self.steps):
             dt = t[step + 1] - t[step]
             y0 = y0 + fn(t[step], y0) * dt
             y0 = y0 + sde_args[1] * (sde_args[2] ** 0.5) * (dt.abs() ** 0.5) * sde_rnd[step]
-            trajectory.append(y0)
 
-        return trajectory[-1]
+        return y0
