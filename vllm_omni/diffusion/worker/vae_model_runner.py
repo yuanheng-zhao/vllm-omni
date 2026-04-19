@@ -1,15 +1,16 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
-"""Minimal model runner hosting a VAE for a dedicated VAE stage.
+"""Legacy thin VAE model runner (deprecated).
 
-This is the AUX-stage runner for the split-VAE demo (#2089).  Unlike
-``DiffusionModelRunner`` it has no scheduler, no KV cache, no continuous
-batching — a VAE stage processes one decode / encode call per request.
+This class predates the generalized aux-stage runtime
+(``vllm_omni.stages.aux``). New code should not instantiate
+``VAEModelRunner`` directly; use the aux-stage triple
+``(module_kind="vae", model_arch="qwen_image", op="decode")`` with
+:class:`vllm_omni.stages.aux.StageAuxClient` instead, which resolves
+:class:`vllm_omni.model_executor.models.qwen_image.QwenImageVaeDecodeAdapter`.
 
-The runner owns the unpack+denormalize math so the upstream diffusion stage
-only needs to emit raw packed latents + request-level metadata (height,
-width, output_type).  Keeping that math next to the VAE weights means the
-diffusion stage does not need to import VAE config to produce its payload.
+The shim is retained so older import sites keep working during the
+migration of downstream users to the aux runtime.
 """
 
 from __future__ import annotations

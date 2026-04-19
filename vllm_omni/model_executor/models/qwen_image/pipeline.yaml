@@ -1,13 +1,15 @@
-# Split-VAE topology for Qwen-Image (RFC #2089).
+# Split-VAE topology for Qwen-Image.
 #
 # Stage 0 runs the Qwen-Image DiT denoising loop but skips the local VAE
-# decode, emitting packed latents + geometry through
-# OmniRequestOutput.custom_output["remote_vae_payload"].
+# decode, emitting packed latents + geometry through a
+# StageBridgePayload (schema: qwen_image.vae.latents.v1).
 # The split behavior is opt-in via `engine_args.remote_vae: true` below.
 #
-# Stage 1 hosts a dedicated VAE (StageVAEProc); the orchestrator routes
-# the packed latents via `latents_from_diffusion` and awaits the decoded
-# image as final output.
+# Stage 1 is a generic aux stage hosting one VAE module. The
+# (module_kind, model_arch, op) triple resolves to
+# QwenImageVaeDecodeAdapter, which owns all unpack / denormalize /
+# decode math. The aux runtime (StageAuxProc + AuxModuleRunner) is
+# model-agnostic.
 
 model_type: qwen_image
 
@@ -26,7 +28,7 @@ stages:
 
   - stage_id: 1
     model_stage: qwen_image_vae
-    stage_type: vae
+    stage_type: aux
     input_sources: [0]
     custom_process_input_func: vllm_omni.model_executor.stage_input_processors.qwen_image_vae.latents_from_diffusion
     final_output: true
@@ -34,6 +36,12 @@ stages:
     runtime:
       devices: "1"
     engine_args:
+      # Aux-stage dispatch triple: picks QwenImageVaeDecodeAdapter from
+      # the adapter registry (registered at qwen_image package import).
+      module_kind: vae
+      model_arch: qwen_image
+      op: decode
+      # Adapter kwargs — forwarded verbatim to the adapter constructor.
       vae_subfolder: vae
       torch_dtype: bfloat16
 
