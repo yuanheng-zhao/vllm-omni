@@ -274,13 +274,14 @@ class OmniOpenAIServingVideo:
                 detail="Stage configs not found. Start server with an omni diffusion model.",
             )
 
-        # Video generation endpoint only supports diffusion stages.
+        # Video generation supports diffusion stages and aux/vae stages
+        # (e.g. a split-VAE decode hanging off the end of the pipeline).
         for stage in stage_configs:
             stage_type = get_stage_type(stage)
-            if stage_type != "diffusion":
+            if stage_type not in ("diffusion", "aux", "vae"):
                 raise HTTPException(
                     status_code=HTTPStatus.SERVICE_UNAVAILABLE.value,
-                    detail=f"Video generation only supports diffusion stages, found '{stage_type}' stage.",
+                    detail=(f"Video generation only supports diffusion / aux stages, found '{stage_type}' stage."),
                 )
 
         # Common generation logic for both paths

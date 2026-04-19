@@ -344,7 +344,13 @@ def load_stage_configs_from_yaml(
                 merged_engine_args = merge_configs(stage_arg.engine_args, base_engine_args_tmp)
             base_engine_args_tmp = create_config(merged_engine_args)
         stage_type = getattr(stage_arg, "stage_type", "llm")
-        if hasattr(stage_arg, "runtime") and stage_arg.runtime is not None and stage_type != "diffusion":
+        # async_chunk is an LLM-stage setting; diffusion / aux / vae
+        # stages don't participate in the chunked transfer protocol.
+        if (
+            hasattr(stage_arg, "runtime")
+            and stage_arg.runtime is not None
+            and stage_type not in ("diffusion", "aux", "vae")
+        ):
             base_engine_args_tmp.async_chunk = global_async_chunk
         stage_arg.engine_args = base_engine_args_tmp
     return stage_args

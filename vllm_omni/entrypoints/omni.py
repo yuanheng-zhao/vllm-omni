@@ -33,7 +33,9 @@ class Omni(OmniBase):
         for stage_id, params in enumerate(sampling_params_list):
             sp = copy.deepcopy(params)
             stage_meta = self.engine.get_stage_metadata(stage_id)
-            if stage_meta.get("stage_type") != "diffusion" and hasattr(sp, "output_kind"):
+            # Only LLM stages get FINAL_ONLY forced; diffusion / aux / vae
+            # stages manage their own output-kind semantics.
+            if stage_meta.get("stage_type") not in ("diffusion", "aux", "vae") and hasattr(sp, "output_kind"):
                 sp.output_kind = RequestOutputKind.FINAL_ONLY
             effective_params.append(sp)
         return effective_params

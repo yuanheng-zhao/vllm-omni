@@ -47,9 +47,16 @@ class StageType(str, Enum):
 
     LLM = "llm"
     DIFFUSION = "diffusion"
-    # Auxiliary stage hosting a single module (VAE, text encoder, image
-    # encoder, ...).  First concrete use: VAE decode offloaded to a dedicated
-    # subprocess so it no longer shares VRAM with the denoiser (see #2089).
+    # Auxiliary stage hosting a single non-autoregressive, non-denoising
+    # PyTorch module — VAE encode/decode, text encoder, CLIP/SigLIP,
+    # audio codec, refiner, upscaler, ... See
+    # vllm_omni/stages/aux/ for the runtime and
+    # docs/design/aux_stage_architecture_proposal.md for the rationale.
+    AUX = "aux"
+    # Deprecated alias for AUX, kept so existing pipeline.yaml files
+    # using ``stage_type: vae`` continue to parse. New pipelines should
+    # use ``stage_type: aux`` with an explicit ``module_kind: vae``
+    # under engine_args.
     VAE = "vae"
 
 

@@ -1704,7 +1704,9 @@ async def _generate_with_async_omni(
     sampling_params_list: list[OmniSamplingParams] = []
     for idx, stage_cfg in enumerate(normalized_stage_configs):
         stage_type = get_stage_type(stage_cfg)
-        if stage_type == "diffusion":
+        # diffusion / aux / vae stages reuse the user-provided gen_params
+        # shape; per-stage default sampling params apply to LLM stages only.
+        if stage_type in ("diffusion", "aux", "vae"):
             sampling_params_list.append(gen_params)
             continue
 

@@ -70,6 +70,7 @@ from vllm_omni.engine.stage_init_utils import (
     extract_stage_metadata,
     finalize_initialized_stages,
     get_stage_connector_spec,
+    initialize_aux_stage,
     initialize_diffusion_stage,
     initialize_vae_stage,
     inject_kv_stage_info,
@@ -667,7 +668,9 @@ class AsyncOmniEngine:
         async_chunk = self.async_chunk
         prompt_expand_func = None
         llm_stage_count = sum(
-            1 for stage_cfg in self.stage_configs if getattr(stage_cfg, "stage_type", "llm") != "diffusion"
+            1
+            for stage_cfg in self.stage_configs
+            if getattr(stage_cfg, "stage_type", "llm") not in ("diffusion", "aux", "vae")
         )
 
         prepare_engine_environment()
@@ -727,20 +730,25 @@ class AsyncOmniEngine:
 
                     omni_kv_connector = resolve_omni_kv_config_for_stage(omni_transfer_config, configured_stage_id)
 
-                    if metadata.stage_type == "vae":
+                    if metadata.stage_type in ("aux", "vae"):
+                        # ``vae`` is retained as a deprecated alias; both
+                        # go through the generalized aux initializer, which
+                        # in turn dispatches on (module_kind, model_arch, op).
+                        init_fn = initialize_vae_stage if metadata.stage_type == "vae" else initialize_aux_stage
                         with llm_stage_launch_lock:
                             previous_visible_devices = os.environ.get(device_control_env)
                             try:
                                 setup_stage_devices(configured_stage_id, metadata.runtime_cfg)
-                                stage_clients[stage_idx] = initialize_vae_stage(
+                                stage_clients[stage_idx] = init_fn(
                                     self.model,
                                     stage_cfg,
                                     metadata,
                                     stage_init_timeout=stage_init_timeout,
                                 )
                                 logger.info(
-                                    "[AsyncOmniEngine] Stage %s initialized (vae)",
+                                    "[AsyncOmniEngine] Stage %s initialized (%s)",
                                     configured_stage_id,
+                                    metadata.stage_type,
                                 )
                             finally:
                                 if previous_visible_devices is None:
@@ -993,7 +1001,7 @@ class AsyncOmniEngine:
         original_prompt = prompt
 
         stage_type = self.stage_metadata[0].get("stage_type")
-        if stage_type != "diffusion" and not isinstance(prompt, EngineCoreRequest):
+        if stage_type not in ("diffusion", "aux", "vae") and not isinstance(prompt, EngineCoreRequest):
             # Inject global_request_id into the raw prompt.
             if isinstance(prompt, dict):
                 _inject_global_id(prompt, request_id)

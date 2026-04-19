@@ -134,7 +134,7 @@ class StageMetadata:
     """Lightweight stage attributes extracted from stage_config."""
 
     stage_id: int
-    stage_type: Literal["llm", "diffusion", "vae"]
+    stage_type: Literal["llm", "diffusion", "aux", "vae"]
     engine_output_type: str | None
     is_comprehension: bool
     requires_multimodal_data: bool
@@ -166,7 +166,7 @@ class StartedLlmStage:
 def extract_stage_metadata(stage_config: Any) -> StageMetadata:
     """Pure data extraction from a stage_config object."""
     stage_id: int = stage_config.stage_id
-    stage_type: Literal["llm", "diffusion", "vae"] = getattr(stage_config, "stage_type", "llm")
+    stage_type: Literal["llm", "diffusion", "aux", "vae"] = getattr(stage_config, "stage_type", "llm")
     engine_args = stage_config.engine_args
 
     if current_omni_platform.is_rocm():
@@ -188,6 +188,9 @@ def extract_stage_metadata(stage_config: Any) -> StageMetadata:
     final_output_type: str | None = getattr(stage_config, "final_output_type", None)
 
     default_sp = _to_dict(getattr(stage_config, "default_sampling_params", {}))
+    # Aux + VAE stages don't run sampler logic but reuse the diffusion
+    # sampling-params shape so the orchestrator's params indexing stays
+    # uniform across non-LLM stage types.
     SPClass = SamplingParams if stage_type == "llm" else OmniDiffusionSamplingParams
     default_sampling_params: OmniSamplingParams = SPClass(**default_sp)
 
@@ -208,10 +211,13 @@ def extract_stage_metadata(stage_config: Any) -> StageMetadata:
         _mod, _fn = _ckf_path.rsplit(".", 1)
         cfg_kv_collect_func = getattr(importlib.import_module(_mod), _fn)
 
-    if stage_type == "vae":
+    if stage_type in ("aux", "vae"):
         return StageMetadata(
             stage_id=stage_id,
-            stage_type="vae",
+            # "vae" is retained as a deprecated alias, but from the
+            # orchestrator's point of view it is indistinguishable from
+            # a generic "aux" stage.
+            stage_type="aux" if stage_type == "vae" else stage_type,
             engine_output_type=None,
             is_comprehension=False,
             requires_multimodal_data=False,
@@ -312,7 +318,10 @@ def build_engine_args_dict(
     if engine_args_dict.get("async_chunk", False):
         engine_args_dict["stage_connector_spec"] = dict(stage_connector_spec or {})
 
-    if stage_type != "diffusion":
+    # Diffusion / aux / vae stages don't go through resolve_worker_cls
+    # — they spawn their own subprocesses (StageDiffusionProc /
+    # StageAuxProc) and never instantiate a vLLM worker.
+    if stage_type not in ("diffusion", "aux", "vae"):
         resolve_worker_cls(engine_args_dict)
 
     return engine_args_dict
@@ -566,14 +575,29 @@ def initialize_diffusion_stage(
     )
 
 
-def initialize_vae_stage(
+def initialize_aux_stage(
     model: str,
     stage_cfg: Any,
     metadata: StageMetadata,
     stage_init_timeout: int,
 ) -> Any:
-    """Build a :class:`StageVAEClient` for a dedicated VAE stage (#2089)."""
-    from vllm_omni.diffusion.stage_vae_client import StageVAEClient
+    """Build a :class:`StageAuxClient` for a generic aux-module stage.
+
+    The stage's YAML ``engine_args`` selects which adapter is loaded
+    via three keys:
+
+    - ``module_kind`` (e.g. ``"vae"``, ``"text_encoder"``)
+    - ``model_arch`` (e.g. ``"qwen_image"``); defaults to the pipeline
+      directory name inferred from ``stage_cfg``.
+    - ``op`` (``"encode"`` / ``"decode"`` / ``"embed"``); defaults to
+      ``"decode"`` for historical parity with the VAE-decode demo.
+
+    Everything else in ``engine_args`` (``vae_subfolder``,
+    ``torch_dtype``, ...) is forwarded verbatim to the adapter's
+    constructor. This matches the "adapter owns all model-specific
+    config" invariant from the aux-stage design doc.
+    """
+    from vllm_omni.stages.aux import StageAuxClient
 
     engine_args = _to_dict(stage_cfg.engine_args)
     runtime = getattr(stage_cfg, "runtime", {}) or {}
@@ -583,14 +607,57 @@ def initialize_vae_stage(
         first_device = str(devices_str).split(",")[0].strip()
     device = f"cuda:{first_device}" if first_device else engine_args.get("device", "cuda:0")
 
-    return StageVAEClient(
+    # Topology fields (module_kind / model_arch / op) are removed from
+    # the adapter kwargs so they aren't double-booked as
+    # AuxAdapter(**engine_args) kwargs later.
+    module_kind = engine_args.pop("module_kind", None)
+    model_arch = engine_args.pop("model_arch", None)
+    op = engine_args.pop("op", "decode")
+
+    if module_kind is None or model_arch is None:
+        raise ValueError(
+            "Aux stage requires 'module_kind' and 'model_arch' under "
+            "stage engine_args (e.g. module_kind: vae, model_arch: qwen_image)."
+        )
+
+    # ``device`` is selected by the proc and not a constructor kwarg
+    # for the adapter; strip it if someone left it in the YAML.
+    engine_args.pop("device", None)
+
+    return StageAuxClient(
+        module_kind=module_kind,
+        model_arch=model_arch,
+        op=op,
         model=model,
-        vae_subfolder=engine_args.get("vae_subfolder", "vae"),
-        torch_dtype=engine_args.get("torch_dtype", "bfloat16"),
         device=device,
+        engine_args=engine_args,
         stage_init_timeout=stage_init_timeout,
         metadata=metadata,
     )
+
+
+def initialize_vae_stage(
+    model: str,
+    stage_cfg: Any,
+    metadata: StageMetadata,
+    stage_init_timeout: int,
+) -> Any:
+    """Legacy entry point — delegates to :func:`initialize_aux_stage`.
+
+    Kept so pipelines that still declare ``stage_type: vae`` (without
+    module_kind / model_arch) keep working: we synthesize the triple
+    from historical defaults (VAE decode for the Qwen-Image demo).
+    New pipelines should use ``stage_type: aux`` with explicit
+    ``module_kind`` / ``model_arch`` / ``op`` in engine_args.
+    """
+    engine_args = _to_dict(stage_cfg.engine_args)
+    engine_args.setdefault("module_kind", "vae")
+    engine_args.setdefault("model_arch", "qwen_image")
+    engine_args.setdefault("op", "decode")
+    # Rebuild stage_cfg engine_args in-place so initialize_aux_stage
+    # sees the synthesized triple.
+    stage_cfg.engine_args = engine_args
+    return initialize_aux_stage(model, stage_cfg, metadata, stage_init_timeout)
 
 
 def _shutdown_or_close_resource(resource: Any, resource_name: str, stage_id: int) -> None:
@@ -657,7 +724,9 @@ def finalize_initialized_stages(
     ]
 
     if not isinstance(input_processor, InputProcessor):
-        has_llm_stage = any(metadata.get("stage_type") != "diffusion" for metadata in stage_metadata)
+        has_llm_stage = any(
+            metadata.get("stage_type") not in ("diffusion", "aux", "vae") for metadata in stage_metadata
+        )
         if has_llm_stage:
             raise RuntimeError("Failed to initialize stage-0 InputProcessor for LLM pipeline")
 

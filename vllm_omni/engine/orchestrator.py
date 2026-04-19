@@ -240,7 +240,7 @@ class Orchestrator:
                 # which is different from EngineCoreOutputs (LLM stages). We may want to unify
                 # the output format in the future to simplify the processing logic in Orchestrator.
                 stage_client = self.stage_clients[stage_id]
-                if stage_client.stage_type == "diffusion":
+                if stage_client.stage_type in ("diffusion", "aux"):
                     output = stage_client.get_diffusion_output_nowait()
                     if output is not None:
                         idle = False
@@ -517,7 +517,7 @@ class Orchestrator:
         next_client = self.stage_clients[next_stage_id]
         params = req_state.sampling_params_list[next_stage_id]
 
-        if next_client.stage_type == "diffusion":
+        if next_client.stage_type in ("diffusion", "aux"):
             self.stage_clients[stage_id].set_engine_outputs([output])
             if next_client.custom_process_input_func is not None:
                 diffusion_prompt = next_client.custom_process_input_func(
@@ -678,7 +678,7 @@ class Orchestrator:
         # already registered there) - submit directly.
         request = prompt
         stage_client = self.stage_clients[stage_id]
-        if stage_client.stage_type == "diffusion":
+        if stage_client.stage_type in ("diffusion", "aux"):
             if isinstance(prompt, list):
                 await stage_client.add_batch_request_async(
                     request_id,
@@ -715,7 +715,7 @@ class Orchestrator:
 
         req_state.stage_submit_ts[stage_id] = _time.time()
         stage_client = self.stage_clients[stage_id]
-        if stage_client.stage_type == "diffusion":
+        if stage_client.stage_type in ("diffusion", "aux"):
             params = req_state.sampling_params_list[stage_id]
             await stage_client.add_request_async(request_id, request, params)
         else:
@@ -762,7 +762,7 @@ class Orchestrator:
             next_client = self.stage_clients[next_stage_id]
             params = req_state.sampling_params_list[next_stage_id]
 
-            if next_client.stage_type == "diffusion":
+            if next_client.stage_type in ("diffusion", "aux"):
                 source_stage_ids = list(getattr(next_client, "engine_input_source", None) or [next_stage_id - 1])
                 kv_sender_info = self._build_kv_sender_info(sender_stage_ids=source_stage_ids)
                 await next_client.add_request_async(
