@@ -43,25 +43,12 @@ class TimestepEmbedder(nn.Module):
 class CondEmbedder(nn.Module):
     """Embeds LLM hidden states with optional CFG dropout."""
 
-    def __init__(self, input_feature_size, hidden_size, dropout_prob):
+    def __init__(self, input_feature_size, hidden_size):
         super().__init__()
-        self.dropout_prob = dropout_prob
         self.cond_embedder = nn.Linear(input_feature_size, hidden_size)
 
-    def cond_drop(self, llm_cond):
-        bsz = llm_cond.shape[0]
-        drop_latent_mask = torch.rand(bsz) < self.dropout_prob
-        drop_latent_mask = drop_latent_mask.unsqueeze(-1).unsqueeze(-1).to(llm_cond.dtype).to(llm_cond.device)
-        fake_latent = torch.zeros(llm_cond.shape).to(llm_cond.device)
-        llm_cond = drop_latent_mask * fake_latent + (1 - drop_latent_mask) * llm_cond
-        return llm_cond
-
-    def forward(self, llm_cond, train):
-        use_dropout = self.dropout_prob > 0
-        if train and use_dropout:
-            llm_cond = self.cond_drop(llm_cond)
-        llm_cond = self.cond_embedder(llm_cond)
-        return llm_cond
+    def forward(self, llm_cond):
+        return self.cond_embedder(llm_cond)
 
 
 class DiT(nn.Module):
@@ -75,19 +62,16 @@ class DiT(nn.Module):
         num_heads=16,
         mlp_ratio=4.0,
         llm_cond_dim=896,
-        cfg_dropout_prob=0.1,
-        grad_checkpointing=False,
         **kwargs,
     ):
         super().__init__()
         self.in_channels = in_channels
         self.out_channels = in_channels
         self.num_heads = num_heads
-        self.grad_checkpointing = grad_checkpointing
 
         self.t_embedder = TimestepEmbedder(hidden_size)
         self.x_embedder = nn.Linear(in_channels, hidden_size)
-        self.c_embedder = CondEmbedder(llm_cond_dim, hidden_size, cfg_dropout_prob)
+        self.c_embedder = CondEmbedder(llm_cond_dim, hidden_size)
         if "spk_dim" in kwargs:
             self.spk_embedder = nn.Linear(kwargs["spk_dim"], hidden_size)
         else:
@@ -105,7 +89,7 @@ class DiT(nn.Module):
         x = torch.cat([latent_history, x], dim=1)
         x = self.x_embedder(x)
         t = self.t_embedder(t).unsqueeze(1)
-        c = self.c_embedder(c, self.training)
+        c = self.c_embedder(c)
         y = t + c
         if spk_emb is None:
             assert self.spk_embedder is None

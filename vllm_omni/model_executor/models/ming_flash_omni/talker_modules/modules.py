@@ -46,7 +46,6 @@ class Attention(nn.Module):
         dropout: float = 0.0,
         qk_norm: str | None = None,
         pe_attn_head: int | None = None,
-        attn_backend: str = "torch",
         attn_mask_enabled: bool = True,
     ):
         super().__init__()
@@ -72,7 +71,6 @@ class Attention(nn.Module):
         self.to_out.append(nn.Dropout(dropout))
 
         self.pe_attn_head = pe_attn_head
-        self.attn_backend = attn_backend
         self.attn_mask_enabled = attn_mask_enabled
 
     def forward(
@@ -110,7 +108,6 @@ class Attention(nn.Module):
                 query = apply_rotary_pos_emb(query, freqs, q_xpos_scale)
                 key = apply_rotary_pos_emb(key, freqs, k_xpos_scale)
 
-        # Only torch backend (no flash_attn dependency)
         if self.attn_mask_enabled and mask is not None:
             valid_sample_indices = mask.any(dim=1)
             final_output = torch.zeros_like(query).to(query.device)
@@ -153,7 +150,6 @@ class DiTBlock(nn.Module):
         dropout=0.1,
         qk_norm=None,
         pe_attn_head=None,
-        attn_backend="torch",
         attn_mask_enabled=True,
         **kwargs,
     ):
@@ -166,7 +162,6 @@ class DiTBlock(nn.Module):
             dropout=dropout,
             qk_norm=qk_norm,
             pe_attn_head=pe_attn_head,
-            attn_backend=attn_backend,
             attn_mask_enabled=attn_mask_enabled,
         )
         self.norm2 = RMSNorm(hidden_size, eps=1e-6)
