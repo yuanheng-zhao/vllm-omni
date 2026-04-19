@@ -1,7 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 # Copyright 2025 The vLLM-Omni team.
-# Adapted from Ming repository AudioVAE/
-# https://github.com/inclusionAI/Ming
+# Adapted from:
+# https://github.com/inclusionAI/Ming/tree/e58533db227031990c5a6864dcf5f08fb53ed0d2/AudioVAE
 
 from __future__ import annotations
 
@@ -41,9 +41,6 @@ class AudioVAEConfig(PretrainedConfig):
         self.init_method = init_method
         self.patch_size = patch_size
         super().__init__(**kwargs)
-
-
-# ─── ISTFT ──────────────────────────────────────────────────────────────────
 
 
 class ISTFT(nn.Module):
@@ -141,9 +138,6 @@ class ISTFTHead(nn.Module):
         return audio.unsqueeze(1), x_pred, audio_buffer, window_buffer
 
 
-# ─── Streaming Linear Upsample ──────────────────────────────────────────────
-
-
 class StreamingLinearUpsample(nn.Module):
     def __init__(self, scale_factor=4):
         super().__init__()
@@ -199,9 +193,6 @@ class StreamingLinearUpsample(nn.Module):
 
         final_out = torch.cat(output_chunks, dim=1) if output_chunks else None
         return final_out, state
-
-
-# ─── Decoder ────────────────────────────────────────────────────────────────
 
 
 class Decoder(nn.Module):
@@ -280,9 +271,6 @@ class Decoder(nn.Module):
         return x_out, stream_state, past_key_values
 
 
-# ─── Encoder (for prompt registration) ──────────────────────────────────────
-
-
 class Encoder(nn.Module):
     def __init__(self, encoder_args, input_dim=320, hop_size=320, latent_dim=64, patch_size=-1):
         super().__init__()
@@ -340,9 +328,6 @@ class Encoder(nn.Module):
 
         x = self.fc3(x)
         return x, waveform.unsqueeze(1)
-
-
-# ─── AudioVAE (full model) ─────────────────────────────────────────────────
 
 
 class AudioVAE(PreTrainedModel):

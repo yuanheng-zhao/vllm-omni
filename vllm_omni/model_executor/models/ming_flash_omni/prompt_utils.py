@@ -1,11 +1,8 @@
-"""Shared prompt-building helpers for Ming-flash-omni standalone talker.
-
-Both the offline example
-(``examples/offline_inference/ming_flash_omni_tts/end2end.py``) and the
-online speech endpoint (``vllm_omni/entrypoints/openai/serving_speech.py``)
-build the talker's ``instruction`` field from the same caption-JSON
-template, so the template lives here to keep them in sync.
-"""
+# SPDX-License-Identifier: Apache-2.0
+# Copyright 2025 The vLLM-Omni team.
+# Adapted from Ming repo's usage cookbook:
+# https://github.com/inclusionAI/Ming/blob/3954fcb880ff5e61ff128bcf7f1ec344d46a6fe3/cookbook.ipynb
+"""Shared prompt-building helpers for Ming-flash-omni standalone talker."""
 
 import copy
 import json

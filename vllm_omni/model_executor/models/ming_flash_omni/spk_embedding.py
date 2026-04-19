@@ -1,7 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 # Copyright 2025 The vLLM-Omni team.
-# Adapted from Ming repository modeling_bailing_talker.py
-# https://github.com/inclusionAI/Ming
+# Ported from:
+# https://github.com/inclusionAI/Ming/blob/e58533db227031990c5a6864dcf5f08fb53ed0d2/modeling_bailing_talker.py
 
 from __future__ import annotations
 
