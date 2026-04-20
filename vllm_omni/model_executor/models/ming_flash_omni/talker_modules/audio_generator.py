@@ -3,6 +3,7 @@
 
 from __future__ import annotations
 
+import logging
 from functools import cached_property
 from typing import TYPE_CHECKING
 
@@ -119,7 +120,17 @@ class MingAudioGenerator:
             all_latents.append(gen_lat)
 
             stop_prob = stop_out.cpu()[0, 1].item()
-            self._log_step(step, stop_prob, last_hs, gen_lat, inputs_embeds)
+
+            if logger.isEnabledFor(logging.DEBUG):
+                if step % 50 == 0 or step < 5:
+                    logger.debug(
+                        "step=%d stop_prob=%.4f hs_norm=%.4f lat_norm=%.4f emb_norm=%.4f",
+                        step,
+                        stop_prob,
+                        last_hs.float().norm().item(),
+                        gen_lat.float().norm().item(),
+                        inputs_embeds.float().norm().item(),
+                    )
 
             if step > min_new_token and stop_prob > 0.5:
                 logger.info("Stopping at step %d with stop_prob=%.4f", step, stop_prob)
@@ -246,24 +257,6 @@ class MingAudioGenerator:
         if self.his_patch_size > self.patch_size:
             return torch.cat([his_lat[:, self.patch_size - self.his_patch_size :], gen_lat], dim=1)
         raise NotImplementedError(f"his_patch_size ({self.his_patch_size}) < patch_size ({self.patch_size})")
-
-    @staticmethod
-    def _log_step(
-        step: int,
-        stop_prob: float,
-        last_hs: torch.Tensor,
-        gen_lat: torch.Tensor,
-        inputs_embeds: torch.Tensor,
-    ) -> None:
-        if step % 50 == 0 or step < 5:
-            logger.info(
-                "step=%d stop_prob=%.4f hs_norm=%.4f lat_norm=%.4f emb_norm=%.4f",
-                step,
-                stop_prob,
-                last_hs.float().norm().item(),
-                gen_lat.float().norm().item(),
-                inputs_embeds.float().norm().item(),
-            )
 
     # VAE streaming decode
     def _stream_decode(self, latents: list[torch.Tensor]) -> torch.Tensor:
