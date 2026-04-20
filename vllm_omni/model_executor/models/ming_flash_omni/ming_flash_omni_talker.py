@@ -1,5 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
 # Copyright 2025 The vLLM-Omni team.
+# Copyright (c) Ant Group. All rights reserved.
 # Adapted from:
 # https://github.com/inclusionAI/Ming/blob/e58533db227031990c5a6864dcf5f08fb53ed0d2/modeling_bailing_talker.py
 """Ming-flash-omni-2.0 talker (TTS) stage model."""
@@ -69,7 +70,7 @@ class _VoiceContext:
 
 
 class MingFlashOmniTalkerForConditionalGeneration(nn.Module, CustomProcessMixin):
-    """Ming-flash-omni-2.0 talker stage: text → audio waveform.
+    """Ming-flash-omni-2.0 talker stage: text -> audio waveform.
 
     Uses Qwen2 LLM + CFM (Conditional Flow Matching with DiT) + Aggregator
     in an autoregressive loop to produce continuous audio latents, then

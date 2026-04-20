@@ -1,5 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
 # Copyright 2025 The vLLM-Omni team.
+# Copyright (c) Ant Group. All rights reserved.
 # Adapted from:
 # https://github.com/inclusionAI/Ming/tree/e58533db227031990c5a6864dcf5f08fb53ed0d2/front
 
@@ -368,7 +369,7 @@ def _num_to_words(n: int) -> str:
 
 
 def _expand_decimal(num_str: str) -> str:
-    """Expand a decimal number string like '3.14' → 'three point one four'."""
+    """Expand a decimal number string like '3.14' -> 'three point one four'."""
     is_negative = num_str.startswith("-")
     clean = num_str.lstrip("-") or "0"
 

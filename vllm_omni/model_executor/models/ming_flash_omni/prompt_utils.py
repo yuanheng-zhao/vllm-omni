@@ -1,5 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
 # Copyright 2025 The vLLM-Omni team.
+# Copyright (c) Ant Group. All rights reserved.
 # Adapted from Ming repo's usage cookbook:
 # https://github.com/inclusionAI/Ming/blob/3954fcb880ff5e61ff128bcf7f1ec344d46a6fe3/cookbook.ipynb
 """Shared prompt-building helpers for Ming-flash-omni standalone talker."""
