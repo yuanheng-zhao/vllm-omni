@@ -83,8 +83,6 @@ def main():
         help=(
             "Structured caption JSON forwarded as `instructions`. Accepts Ming "
             "caption keys: 方言, 风格, 语速, 基频, 音量, 情感, IP, 说话人, BGM. "
-            'Example: --instruction-json \'{"方言": "广粤话", "情感": "高兴"}\'. '
-            "Mutually exclusive with --instructions."
         ),
     )
     args = parser.parse_args()

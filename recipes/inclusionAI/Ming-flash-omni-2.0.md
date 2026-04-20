@@ -199,24 +199,10 @@ curl -X POST http://localhost:8091/v1/audio/speech \
     -H "Content-Type: application/json" \
     -d '{
       "model": "Jonathan1909/Ming-flash-omni-2.0",
-      "input": "春天来了，万物复苏，大地一片生机盎然。",
+      "input": "春天来了，万物复苏，大地一片生机盎然。田野里的油菜花开得金灿灿的，蜜蜂在花丛中忙碌地采蜜。远处的山坡上，桃花和杏花竞相绽放，粉的白的交织在一起，美不胜收。清晨的微风带着泥土的芬芳，轻轻拂过脸颊，让人感到无比惬意。孩子们在田间小路上追逐嬉戏，老人们坐在门前晒太阳，享受着这份宁静与美好。",
       "speaker": "lingguang",
       "response_format": "wav"
     }' --output ming_online_lingguang.wav
-```
-
-Dialect + emotion via `instructions` (forwarded as caption JSON, covering
-`风格` / `方言` / `情感`):
-
-```bash
-curl -X POST http://localhost:8091/v1/audio/speech \
-    -H "Content-Type: application/json" \
-    -d '{
-      "model": "Jonathan1909/Ming-flash-omni-2.0",
-      "input": "今日天气真系好靓，出去行下啦！",
-      "instructions": "{\"方言\": \"粤语\", \"情感\": \"开心\"}",
-      "response_format": "wav"
-    }' --output ming_online_cantonese.wav
 ```
 
 #### Notes
