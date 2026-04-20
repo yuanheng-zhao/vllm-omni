@@ -9,6 +9,7 @@ from queue import Queue
 from threading import Lock
 
 import torch
+import torch.nn as nn
 
 from .cfm import get_epss_timesteps
 
@@ -16,7 +17,7 @@ from .cfm import get_epss_timesteps
 class CFMGraphExecutor:
     """CUDA graph-accelerated executor for CFM + Aggregator + StopHead pipeline."""
 
-    def __init__(self, config, cfm, aggregator, stop_head):
+    def __init__(self, config, cfm, aggregator, stop_head: nn.Linear):
         self.config = config
         self.cfm = cfm
         self.aggregator = aggregator
@@ -34,7 +35,14 @@ class CFMGraphExecutor:
         self.stop_out_placeholder = None
         self.graph = None
 
-    def execute(self, input_tensor, his_lat, cfg_strength=2.0, sigma=0.25, temperature=0.0):
+    def execute(
+        self,
+        input_tensor: torch.Tensor,
+        his_lat: torch.Tensor,
+        cfg_strength: float = 2.0,
+        sigma: float = 0.25,
+        temperature: float = 0.0,
+    ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
         bat_size, his_patch_size, z_dim = his_lat.shape
         randn_tensor = torch.randn(
             (bat_size, self.config.patch_size, z_dim), device=input_tensor.device, dtype=input_tensor.dtype
@@ -69,7 +77,13 @@ class CFMGraphExecutor:
 
         return gen_lat, inputs_embeds, stop_out
 
-    def _initialize_graph(self, input_tensor, his_lat, randn_tensor, sde_rnd):
+    def _initialize_graph(
+        self,
+        input_tensor: torch.Tensor,
+        his_lat: torch.Tensor,
+        randn_tensor: torch.Tensor,
+        sde_rnd: torch.Tensor,
+    ) -> None:
         self.last_hidden_state_placeholder = torch.empty_like(input_tensor)
         self.his_lat_placeholder = torch.empty_like(his_lat)
         self.randn_like_placeholder = torch.empty_like(randn_tensor)
@@ -96,7 +110,7 @@ class CFMGraphExecutor:
 class CFMGraphExecutorPool:
     """Thread-safe pool of CFMGraphExecutors for concurrent inference."""
 
-    def __init__(self, config, cfm, aggregator, stop_head, pool_size=1):
+    def __init__(self, config, cfm, aggregator, stop_head: nn.Linear, pool_size: int = 1):
         self.config = config
         self.cfm = cfm
         self.aggregator = aggregator
@@ -109,13 +123,20 @@ class CFMGraphExecutorPool:
             executor = CFMGraphExecutor(config, cfm, aggregator, stop_head)
             self.pool.put(executor)
 
-    def acquire(self):
+    def acquire(self) -> CFMGraphExecutor:
         return self.pool.get()
 
     def release(self, executor: CFMGraphExecutor) -> None:
         self.pool.put(executor)
 
-    def execute(self, input_tensor, his_lat, cfg_strength=2.0, sigma=0.25, temperature=0.0):
+    def execute(
+        self,
+        input_tensor: torch.Tensor,
+        his_lat: torch.Tensor,
+        cfg_strength: float = 2.0,
+        sigma: float = 0.25,
+        temperature: float = 0.0,
+    ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
         executor = self.acquire()
         try:
             return executor.execute(

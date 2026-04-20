@@ -13,11 +13,11 @@ from .modules import DiTBlock, FinalLayer
 
 
 class SinusPositionEmbedding(nn.Module):
-    def __init__(self, dim):
+    def __init__(self, dim: int):
         super().__init__()
         self.dim = dim
 
-    def forward(self, x, scale=1000):
+    def forward(self, x: torch.Tensor, scale: float = 1000) -> torch.Tensor:
         device = x.device
         half_dim = self.dim // 2
         emb = math.log(10000) / (half_dim - 1)
@@ -28,12 +28,12 @@ class SinusPositionEmbedding(nn.Module):
 
 
 class TimestepEmbedder(nn.Module):
-    def __init__(self, dim, freq_embed_dim=256):
+    def __init__(self, dim: int, freq_embed_dim: int = 256):
         super().__init__()
         self.time_embed = SinusPositionEmbedding(freq_embed_dim)
         self.time_mlp = nn.Sequential(nn.Linear(freq_embed_dim, dim), nn.SiLU(), nn.Linear(dim, dim))
 
-    def forward(self, timestep):
+    def forward(self, timestep: torch.Tensor) -> torch.Tensor:
         time_hidden = self.time_embed(timestep)
         time_hidden = time_hidden.to(timestep.dtype)
         time = self.time_mlp(time_hidden)
@@ -43,11 +43,11 @@ class TimestepEmbedder(nn.Module):
 class CondEmbedder(nn.Module):
     """Embeds LLM hidden states with optional CFG dropout."""
 
-    def __init__(self, input_feature_size, hidden_size):
+    def __init__(self, input_feature_size: int, hidden_size: int):
         super().__init__()
         self.cond_embedder = nn.Linear(input_feature_size, hidden_size)
 
-    def forward(self, llm_cond):
+    def forward(self, llm_cond: torch.Tensor) -> torch.Tensor:
         return self.cond_embedder(llm_cond)
 
 
@@ -56,12 +56,12 @@ class DiT(nn.Module):
 
     def __init__(
         self,
-        in_channels=64,
-        hidden_size=1024,
-        depth=28,
-        num_heads=16,
-        mlp_ratio=4.0,
-        llm_cond_dim=896,
+        in_channels: int = 64,
+        hidden_size: int = 1024,
+        depth: int = 28,
+        num_heads: int = 16,
+        mlp_ratio: float = 4.0,
+        llm_cond_dim: int = 896,
         **kwargs,
     ):
         super().__init__()
@@ -85,7 +85,14 @@ class DiT(nn.Module):
         )
         self.final_layer = FinalLayer(hidden_size, self.out_channels)
 
-    def forward(self, x, t, c, latent_history, spk_emb=None):
+    def forward(
+        self,
+        x: torch.Tensor,
+        t: torch.Tensor,
+        c: torch.Tensor,
+        latent_history: torch.Tensor,
+        spk_emb: torch.Tensor | None = None,
+    ) -> torch.Tensor:
         x = torch.cat([latent_history, x], dim=1)
         x = self.x_embedder(x)
         t = self.t_embedder(t).unsqueeze(1)
@@ -103,7 +110,14 @@ class DiT(nn.Module):
         x = self.final_layer(x)
         return x
 
-    def forward_with_cfg(self, x, t, c, latent_history, spk_emb=None):
+    def forward_with_cfg(
+        self,
+        x: torch.Tensor,
+        t: torch.Tensor,
+        c: torch.Tensor,
+        latent_history: torch.Tensor,
+        spk_emb: torch.Tensor | None = None,
+    ) -> torch.Tensor:
         """Forward with classifier-free guidance (doubles batch for CFG)."""
         x = torch.cat([x, x], dim=0)
         latent_history = torch.cat([latent_history, latent_history], dim=0)

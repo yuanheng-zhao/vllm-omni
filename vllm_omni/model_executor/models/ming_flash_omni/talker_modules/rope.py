@@ -8,12 +8,12 @@ import torch
 import torch.nn as nn
 
 
-def rotate_half(x):
+def rotate_half(x: torch.Tensor) -> torch.Tensor:
     x1, x2 = x.chunk(2, dim=-1)
     return torch.cat((-x2, x1), dim=-1)
 
 
-def apply_rotary_pos_emb(t, freqs, scale=1.0):
+def apply_rotary_pos_emb(t: torch.Tensor, freqs: torch.Tensor, scale: float = 1.0) -> torch.Tensor:
     """Apply rotary position embeddings to tensor t.
 
     Compatible with x_transformers.x_transformers.apply_rotary_pos_emb.
@@ -38,12 +38,12 @@ class RotaryEmbedding(nn.Module):
     matching the API used by DiT and Aggregator.
     """
 
-    def __init__(self, dim, theta=10000.0):
+    def __init__(self, dim: int, theta: float = 10000.0):
         super().__init__()
         inv_freq = 1.0 / (theta ** (torch.arange(0, dim, 2).float() / dim))
         self.register_buffer("inv_freq", inv_freq, persistent=False)
 
-    def forward_from_seq_len(self, seq_len):
+    def forward_from_seq_len(self, seq_len: int) -> tuple[torch.Tensor, None]:
         t = torch.arange(seq_len, device=self.inv_freq.device, dtype=self.inv_freq.dtype)
         freqs = torch.einsum("i,j->ij", t, self.inv_freq)
         freqs = torch.cat((freqs, freqs), dim=-1)  # (seq_len, dim)

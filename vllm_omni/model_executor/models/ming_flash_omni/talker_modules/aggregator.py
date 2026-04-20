@@ -15,12 +15,12 @@ class Aggregator(nn.Module):
 
     def __init__(
         self,
-        in_channels=64,
-        hidden_size=1152,
-        depth=28,
-        num_heads=16,
-        mlp_ratio=4.0,
-        llm_input_dim=896,
+        in_channels: int = 64,
+        hidden_size: int = 1152,
+        depth: int = 28,
+        num_heads: int = 16,
+        mlp_ratio: float = 4.0,
+        llm_input_dim: int = 896,
         **kwargs,
     ):
         super().__init__()
@@ -39,7 +39,7 @@ class Aggregator(nn.Module):
         )
         self.final_layer = FinalLayer(hidden_size, llm_input_dim)
 
-    def forward(self, x, mask=None):
+    def forward(self, x: torch.Tensor, mask: torch.Tensor | None = None) -> torch.Tensor:
         x = self.x_embedder(x)
         cls_embed = self.word_embedder(torch.zeros((x.shape[0], 1), dtype=torch.long, device=x.device))
         x = torch.cat([cls_embed, x], dim=1)

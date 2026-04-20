@@ -44,7 +44,15 @@ class CFM(nn.Module):
         self.sway_sampling_coef = sway_sampling_coef
 
     @torch.no_grad()
-    def sample(self, llm_cond, lat_cond, y0, t, sde_args, sde_rnd):
+    def sample(
+        self,
+        llm_cond: torch.Tensor,
+        lat_cond: torch.Tensor,
+        y0: torch.Tensor,
+        t: torch.Tensor,
+        sde_args: torch.Tensor,
+        sde_rnd: torch.Tensor,
+    ):
         """Sample audio latent via ODE/SDE integration with CFG.
 
         Args:

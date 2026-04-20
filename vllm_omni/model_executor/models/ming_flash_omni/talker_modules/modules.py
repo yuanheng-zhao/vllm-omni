@@ -16,7 +16,7 @@ class RMSNorm(nn.Module):
         self.eps = eps
         self.weight = nn.Parameter(torch.ones(dim))
 
-    def forward(self, x):
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
         if self.weight.dtype in [torch.float16, torch.bfloat16]:
             x = x.to(self.weight.dtype)
         x = F.rms_norm(x, normalized_shape=(x.shape[-1],), weight=self.weight, eps=self.eps)
@@ -24,7 +24,9 @@ class RMSNorm(nn.Module):
 
 
 class FeedForward(nn.Module):
-    def __init__(self, dim, dim_out=None, mult=4, dropout=0.0, approximate: str = "none"):
+    def __init__(
+        self, dim: int, dim_out: int | None = None, mult: float = 4, dropout: float = 0.0, approximate: str = "none"
+    ):
         super().__init__()
         inner_dim = int(dim * mult)
         dim_out = dim_out if dim_out is not None else dim
@@ -33,7 +35,7 @@ class FeedForward(nn.Module):
         project_in = nn.Sequential(nn.Linear(dim, inner_dim), activation)
         self.ff = nn.Sequential(project_in, nn.Dropout(dropout), nn.Linear(inner_dim, dim_out))
 
-    def forward(self, x):
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
         return self.ff(x)
 
 
@@ -75,9 +77,9 @@ class Attention(nn.Module):
 
     def forward(
         self,
-        x: float,
-        mask=None,
-        rope=None,
+        x: torch.Tensor,
+        mask: torch.Tensor | None = None,
+        rope: tuple[torch.Tensor, torch.Tensor | None] | None = None,
     ) -> torch.Tensor:
         batch_size = x.shape[0]
 
@@ -144,13 +146,13 @@ class DiTBlock(nn.Module):
 
     def __init__(
         self,
-        hidden_size,
-        num_heads,
-        mlp_ratio=4.0,
-        dropout=0.1,
-        qk_norm=None,
-        pe_attn_head=None,
-        attn_mask_enabled=True,
+        hidden_size: int,
+        num_heads: int,
+        mlp_ratio: float = 4.0,
+        dropout: float = 0.1,
+        qk_norm: str | None = None,
+        pe_attn_head: int | None = None,
+        attn_mask_enabled: bool = True,
         **kwargs,
     ):
         super().__init__()
@@ -167,7 +169,12 @@ class DiTBlock(nn.Module):
         self.norm2 = RMSNorm(hidden_size)
         self.mlp = FeedForward(dim=hidden_size, mult=mlp_ratio, dropout=dropout, approximate="tanh")
 
-    def forward(self, x, mask, rope):
+    def forward(
+        self,
+        x: torch.Tensor,
+        mask: torch.Tensor | None,
+        rope: tuple[torch.Tensor, torch.Tensor | None] | None,
+    ) -> torch.Tensor:
         x = x + self.attn(self.norm1(x), mask=mask, rope=rope)
         x = x + self.mlp(self.norm2(x))
         return x
@@ -176,12 +183,12 @@ class DiTBlock(nn.Module):
 class FinalLayer(nn.Module):
     """The final layer of DiT."""
 
-    def __init__(self, hidden_size, out_channels):
+    def __init__(self, hidden_size: int, out_channels: int):
         super().__init__()
         self.norm_final = RMSNorm(hidden_size)
         self.linear = nn.Linear(hidden_size, out_channels, bias=True)
 
-    def forward(self, x):
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
         x = self.norm_final(x)
         x = self.linear(x)
         return x
