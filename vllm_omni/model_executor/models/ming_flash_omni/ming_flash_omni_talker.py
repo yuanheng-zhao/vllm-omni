@@ -7,15 +7,16 @@
 from __future__ import annotations
 
 import glob as glob_module
-import json
 import os
 from collections.abc import Iterable
+from dataclasses import dataclass
+from functools import cached_property
+from typing import Any
 
-import soundfile as sf
 import torch
 import torch.nn as nn
 from safetensors.torch import load_file
-from transformers import AutoTokenizer, Qwen2Config, Qwen2Model, StaticCache
+from transformers import AutoTokenizer, Qwen2Config, Qwen2Model
 from transformers.utils.hub import cached_file
 from vllm.config import VllmConfig
 from vllm.logger import init_logger
@@ -29,18 +30,42 @@ from vllm_omni.transformers_utils.configs.ming_flash_omni import MingFlashOmniTa
 
 from .audio_vae import AudioVAE, AudioVAEConfig
 from .prompt_utils import DEFAULT_PROMPT as MING_DEFAULT_PROMPT
-from .spk_embedding import SpkembExtractor
 from .talker_modules.aggregator import Aggregator
-from .talker_modules.cfm import CFM, get_epss_timesteps
-from .talker_modules.cfm_graph_executor import CFMGraphExecutorPool
+from .talker_modules.audio_generator import MingAudioGenerator
+from .talker_modules.cfm import CFM
 from .talker_modules.dit import DiT
+from .talker_modules.prompt_builder import build_tts_input
 from .text_processing import segment_and_normalize
+from .voice_presets import VoicePresetRegistry
 
 logger = init_logger(__name__)
 
 
-class InvalidPromptWavError(ValueError):
-    """Prompt wav failed local validation and can be skipped in list mode."""
+@dataclass(slots=True)
+class _GenerationParams:
+    """Resolved sampling / decoding parameters for one forward call."""
+
+    prompt: str
+    instruction: str | None
+    cfg: float
+    sigma: float
+    temperature: float
+    max_steps: int
+    use_zero_spk_emb: bool
+    max_text_length: int
+    use_static_cache: bool
+    stream_decode: bool
+
+
+@dataclass(slots=True)
+class _VoiceContext:
+    """Voice cloning inputs resolved from request info + presets."""
+
+    spk_emb: Any  # list[Tensor] | Tensor | list[float] | None
+    prompt_text: str | None
+    prompt_wav_lat: torch.Tensor | None
+    prompt_wav_emb: torch.Tensor | None
+    already_projected: bool
 
 
 class MingFlashOmniTalkerForConditionalGeneration(nn.Module, CustomProcessMixin):
@@ -58,31 +83,31 @@ class MingFlashOmniTalkerForConditionalGeneration(nn.Module, CustomProcessMixin)
         self.has_postprocess = False
 
         self.vllm_config = vllm_config
-        config = vllm_config.model_config.hf_config
-        print(f" >>> config : {type(config)}")
+        root_config = vllm_config.model_config.hf_config
 
         model_path = vllm_config.model_config.model
         self._model_path = model_path
-        talker_dir = (
+        self.talker_dir = (
             os.path.join(model_path, "talker") if os.path.isdir(os.path.join(model_path, "talker")) else model_path
         )
-        self._talker_dir = talker_dir
 
         # When used standalone (model_arch=MingFlashOmniTalkerForConditionalGeneration),
-        # the root hf_config may be BailingMM2Config (thinker-only).  Resolve the
-        # talker config from talker/config.json in that case.
-        if not isinstance(config, MingFlashOmniTalkerConfig):
-            config = self._resolve_talker_config(config, talker_dir, model_path)
-
+        # the root hf_config may be BailingMM2Config (thinker-only) due to model file structure
+        # Resolve talker config from talker/config.json in that case.
+        config = (
+            root_config
+            if isinstance(root_config, MingFlashOmniTalkerConfig)
+            else self._resolve_talker_config(root_config, self.talker_dir, model_path)
+        )
         self.config = config
 
-        self._standalone = prefix == "" or prefix == "talker"
+        self._standalone = prefix in ("", "talker")
         if self._standalone:
             self.allow_patterns_overrides = ["talker/model*.safetensors"]
             self.fall_back_to_pt_during_load = False
 
         # LLM
-        llm_config = self._resolve_llm_config(config, talker_dir, model_path)
+        llm_config = self._resolve_llm_config(config, self.talker_dir, model_path)
         llm_config._attn_implementation = "sdpa"
         self.llm_config = llm_config
         self.hidden_size = llm_config.hidden_size
@@ -91,7 +116,6 @@ class MingFlashOmniTalkerForConditionalGeneration(nn.Module, CustomProcessMixin)
         self.his_patch_size = config.history_patch_size
         self.cfg_strength = config.cfg_strength
 
-        # Sub-modules
         self.model = Qwen2Model(llm_config)
         self.cfm = CFM(
             DiT(llm_input_dim=self.hidden_size, **config.flowmodel),
@@ -99,32 +123,70 @@ class MingFlashOmniTalkerForConditionalGeneration(nn.Module, CustomProcessMixin)
         )
         self.aggregator = Aggregator(llm_input_dim=self.hidden_size, **config.aggregator)
         self.stop_head = nn.Linear(self.hidden_size, 2, bias=True)
-        self.spk_head = nn.Linear(192, self.hidden_size, bias=True)  # CAMPPlus 192-dim → hidden
+        # CAMPPlus 192-dim -> hidden
+        self.spk_head = nn.Linear(192, self.hidden_size, bias=True)
 
         # AudioVAE
-        self.audio_vae, self._vae_weight_source = self._init_audio_vae(
-            config,
-            talker_dir,
-            model_path,
-        )
+        self.audio_vae, self._vae_weight_source = self._init_audio_vae(config, self.talker_dir, model_path)
 
-        # Tokenizer (loaded lazily from talker/llm/ subdirectory)
-        self._tokenizer = None
-
-        # CFM Graph executor (initialized lazily on first forward)
-        self._sampler_pool: CFMGraphExecutorPool | None = None
         self._use_cuda_graphs = not vllm_config.model_config.enforce_eager
 
-        # Voice preset cache: voice_name → {prompt_wav_lat, prompt_wav_emb, spk_emb}
-        self.registered_prompts: dict[str, dict[str, torch.Tensor]] = {}
-        self._spkemb_extractor = None
+        self.audio_generator = MingAudioGenerator(
+            config=self.config,
+            llm_config=self.llm_config,
+            model=self.model,
+            cfm=self.cfm,
+            aggregator=self.aggregator,
+            stop_head=self.stop_head,
+            audio_vae=self.audio_vae,
+            patch_size=self.patch_size,
+            his_patch_size=self.his_patch_size,
+            latent_dim=self.latent_dim,
+            cfg_strength=self.cfg_strength,
+            use_cuda_graphs=self._use_cuda_graphs,
+        )
+        self.voice_presets = VoicePresetRegistry(
+            talker_dir=self.talker_dir,
+            model_path=self._model_path,
+            download_dir=vllm_config.load_config.download_dir,
+            audio_vae=self.audio_vae,
+            aggregator=self.aggregator,
+            spk_head=self.spk_head,
+            patch_size=self.patch_size,
+        )
+
+    @property
+    def device(self) -> torch.device:
+        return next(self.model.parameters()).device
+
+    @property
+    def dtype(self) -> torch.dtype:
+        return next(self.model.parameters()).dtype
+
+    @cached_property
+    def tokenizer(self):
+        # Lazy Qwen2 tokenizer resolution:
+        #   1. Try local dirs first (talker/llm, talker, and then model root).
+        #   2. HF repo-id fallback: talker/llm is the canonical tokenizer location.
+        candidates = (os.path.join(self.talker_dir, "llm"), self.talker_dir, self._model_path)
+        for path in candidates:
+            if os.path.isdir(path):
+                try:
+                    logger.debug("Resolving talker tokenizer from local dir %s", path)
+                    return AutoTokenizer.from_pretrained(path, trust_remote_code=True)
+                except Exception:
+                    continue
+        for subfolder in ("talker/llm", "llm"):
+            try:
+                logger.debug("Resolving talker tokenizer from HF subfolder %s", subfolder)
+                return AutoTokenizer.from_pretrained(self._model_path, subfolder=subfolder, trust_remote_code=True)
+            except Exception:
+                continue
+        logger.debug("Falling back to raw model_path tokenizer resolution")
+        return AutoTokenizer.from_pretrained(self._model_path, trust_remote_code=True)
 
     @staticmethod
-    def _resolve_talker_config(
-        config,
-        talker_dir: str,
-        model_path: str,
-    ) -> MingFlashOmniTalkerConfig:
+    def _resolve_talker_config(config, talker_dir: str, model_path: str) -> MingFlashOmniTalkerConfig:
         """Resolve MingFlashOmniTalkerConfig when the root config is not one.
 
         This happens in standalone TTS mode where hf_config is BailingMM2Config.
@@ -143,13 +205,8 @@ class MingFlashOmniTalkerForConditionalGeneration(nn.Module, CustomProcessMixin)
             except Exception:
                 pass
 
-        # HF hub fallback
         try:
-            resolved = MingFlashOmniTalkerConfig.from_pretrained(
-                model_path,
-                subfolder="talker",
-                trust_remote_code=True,
-            )
+            resolved = MingFlashOmniTalkerConfig.from_pretrained(model_path, subfolder="talker", trust_remote_code=True)
             logger.info("Resolved talker config from %s/talker (HF hub)", model_path)
             return resolved
         except Exception as e:
@@ -160,16 +217,11 @@ class MingFlashOmniTalkerForConditionalGeneration(nn.Module, CustomProcessMixin)
             ) from e
 
     @staticmethod
-    def _resolve_llm_config(
-        config: MingFlashOmniTalkerConfig,
-        talker_dir: str,
-        model_path: str,
-    ) -> Qwen2Config:
+    def _resolve_llm_config(config: MingFlashOmniTalkerConfig, talker_dir: str, model_path: str) -> Qwen2Config:
         """Resolve the Qwen2 LLM config for the talker backbone."""
+
         if config.llm_config is not None:
-            if isinstance(config.llm_config, dict):
-                return Qwen2Config(**config.llm_config)
-            return config.llm_config
+            return Qwen2Config(**config.llm_config) if isinstance(config.llm_config, dict) else config.llm_config
 
         # Try local talker/llm directory
         llm_dir = os.path.join(talker_dir, "llm")
@@ -179,11 +231,7 @@ class MingFlashOmniTalkerForConditionalGeneration(nn.Module, CustomProcessMixin)
         # HF hub fallback
         for subfolder in ("talker/llm", "llm"):
             try:
-                return Qwen2Config.from_pretrained(
-                    model_path,
-                    subfolder=subfolder,
-                    trust_remote_code=True,
-                )
+                return Qwen2Config.from_pretrained(model_path, subfolder=subfolder, trust_remote_code=True)
             except Exception:
                 continue
 
@@ -195,9 +243,7 @@ class MingFlashOmniTalkerForConditionalGeneration(nn.Module, CustomProcessMixin)
 
     @staticmethod
     def _init_audio_vae(
-        config: MingFlashOmniTalkerConfig,
-        talker_dir: str,
-        model_path: str,
+        config: MingFlashOmniTalkerConfig, talker_dir: str, model_path: str
     ) -> tuple[AudioVAE | None, str | tuple[str, str] | None]:
         """Initialize AudioVAE and return (vae, weight_source).
 
@@ -220,13 +266,9 @@ class MingFlashOmniTalkerForConditionalGeneration(nn.Module, CustomProcessMixin)
         # HF hub fallback
         for subfolder in ("talker/vae", "vae"):
             try:
-                vae_config = AudioVAEConfig.from_pretrained(
-                    model_path,
-                    subfolder=subfolder,
-                    trust_remote_code=True,
-                )
+                vae_config = AudioVAEConfig.from_pretrained(model_path, subfolder=subfolder, trust_remote_code=True)
                 vae = AudioVAE(vae_config)
-                logger.info("Initialized AudioVAE from %s/%s (sr=%d)", model_path, subfolder, vae_config.sample_rate)
+                logger.info(f"Initialized AudioVAE from {model_path}/{subfolder}")
                 return vae, (model_path, subfolder)
             except Exception:
                 continue
@@ -234,669 +276,10 @@ class MingFlashOmniTalkerForConditionalGeneration(nn.Module, CustomProcessMixin)
         logger.info("AudioVAE not found at %s; waveform decoding unavailable", vae_path)
         return None, None
 
-    @property
-    def tokenizer(self):
-        if self._tokenizer is None:
-            # Try local dirs first (talker/llm, talker, model root).
-            candidates = [os.path.join(self._talker_dir, "llm"), self._talker_dir, self._model_path]
-            for path in candidates:
-                if os.path.isdir(path):
-                    try:
-                        self._tokenizer = AutoTokenizer.from_pretrained(path, trust_remote_code=True)
-                        print(f" >>> tokenizer: local dir {path}")
-                        break
-                    except Exception:
-                        continue
-
-            if self._tokenizer is None:
-                # HF repo-id fallback: talker/llm is the canonical tokenizer location.
-                for subfolder in ("talker/llm", "llm"):
-                    try:
-                        self._tokenizer = AutoTokenizer.from_pretrained(
-                            self._model_path, subfolder=subfolder, trust_remote_code=True
-                        )
-                        print(f" >>> tokenizer: repo id subfolder {subfolder}")
-                        break
-                    except Exception:
-                        continue
-
-            if self._tokenizer is None:
-                # Last resort: try the raw model_path/tokenizer auto resolution.
-                self._tokenizer = AutoTokenizer.from_pretrained(self._model_path, trust_remote_code=True)
-                print(" >>> tokenizer: raw model_path/tokenizer auto resolution")
-        return self._tokenizer
-
-    @property
-    def device(self):
-        return next(self.model.parameters()).device
-
-    @property
-    def dtype(self):
-        return next(self.model.parameters()).dtype
-
-    def _get_sampler_pool(self):
-        """Lazily initialize CFM graph executor pool."""
-        if self._sampler_pool is None:
-            if self._use_cuda_graphs and self.device.type == "cuda":
-                self._sampler_pool = CFMGraphExecutorPool(
-                    self.config, self.cfm, self.aggregator, self.stop_head, pool_size=1
-                )
-            else:
-                self._sampler_pool = None
-        return self._sampler_pool
-
-    def _get_spkemb_extractor(self):
-        """Lazily initialize the CAMPPlus speaker embedding extractor."""
-        if self._spkemb_extractor is None:
-            campplus_path = None
-            for candidate in (self._talker_dir, self._model_path):
-                path = os.path.join(candidate, "campplus.onnx")
-                if os.path.isfile(path):
-                    campplus_path = path
-                    break
-            if campplus_path is None:
-                try:
-                    campplus_path = cached_file(self._model_path, "campplus.onnx", subfolder="talker")
-                except Exception:
-                    pass
-            if campplus_path is None:
-                raise RuntimeError("campplus.onnx not found. Expected at <model_path>/talker/campplus.onnx")
-            self._spkemb_extractor = SpkembExtractor(campplus_path)
-            logger.info("Initialized SpkembExtractor from %s", campplus_path)
-        return self._spkemb_extractor
-
-    @torch.no_grad()
-    def _resample(self, waveform: torch.Tensor, orig_sr: int, target_sr: int) -> torch.Tensor:
-        """Resample waveform using linear interpolation (no torchaudio needed)."""
-        if orig_sr <= 0:
-            raise ValueError(f"orig_sr must be positive, got {orig_sr}")
-        if target_sr <= 0:
-            raise ValueError(f"target_sr must be positive, got {target_sr}")
-        if waveform.numel() == 0 or waveform.shape[-1] == 0:
-            raise ValueError("waveform must contain at least one sample")
-        if orig_sr == target_sr:
-            return waveform
-
-        ratio = target_sr / orig_sr
-        new_len = int(waveform.shape[-1] * ratio)
-        if new_len <= 0:
-            raise ValueError(
-                f"resampled waveform would be empty for input length {waveform.shape[-1]}, "
-                f"orig_sr={orig_sr}, target_sr={target_sr}"
-            )
-        return torch.nn.functional.interpolate(
-            waveform.unsqueeze(0),
-            size=new_len,
-            mode="linear",
-            align_corners=False,
-        ).squeeze(0)
-
-    def register_prompt_wav(self, voice_name: str, prompt_wav_path: str | list[str]) -> None:
-        """Register a voice preset from reference wav file(s).
-
-        Extracts and caches spk_emb, prompt_wav_lat, and prompt_wav_emb
-        for reuse across requests.
-        """
-        if not isinstance(voice_name, str) or not voice_name.strip():
-            raise ValueError("voice_name must be a non-empty string")
-        if isinstance(prompt_wav_path, str):
-            prompt_wav_paths = [prompt_wav_path]
-        elif isinstance(prompt_wav_path, list):
-            prompt_wav_paths = prompt_wav_path
-        else:
-            raise TypeError("prompt_wav_path must be a string path or a list of string paths")
-
-        prompt_wav_paths = [path.strip() for path in prompt_wav_paths]
-        if not prompt_wav_paths or any(not path for path in prompt_wav_paths):
-            raise ValueError("Provided audio path is invalid")
-
-        allow_partial = len(prompt_wav_paths) > 1
-        extractor = self._get_spkemb_extractor()
-        vae_sr = int(self.audio_vae.config.sample_rate) if self.audio_vae else 44100
-        if self.audio_vae is None:
-            logger.warning(f"Voice preset '{voice_name}' being registered without AudioVAE features...")
-
-        speech_chunks = []
-        spk_emb_list = []
-        for wav_path in prompt_wav_paths:
-            try:
-                if not os.path.isfile(wav_path):
-                    raise FileNotFoundError(f"prompt wav not found: {wav_path}")
-
-                data, sample_rate = sf.read(wav_path, dtype="float32")
-
-                speech_tmp = torch.from_numpy(data)
-                if speech_tmp.ndim == 1:
-                    speech_tmp = speech_tmp.unsqueeze(0)
-                elif speech_tmp.ndim == 2:
-                    num_channels = speech_tmp.shape[1]
-                    if num_channels > 1:
-                        logger.warning(
-                            "Voice preset '%s': downmixing %d-channel audio at %s to mono",
-                            voice_name,
-                            num_channels,
-                            wav_path,
-                        )
-                    speech_tmp = speech_tmp.mean(dim=1, keepdim=True).T
-                else:
-                    raise InvalidPromptWavError(f"unsupported audio shape {tuple(speech_tmp.shape)} for {wav_path}")
-
-                if not torch.isfinite(speech_tmp).all():
-                    raise InvalidPromptWavError(f"audio file contains NaN or Inf samples: {wav_path}")
-
-                speech_for_vae = self._resample(speech_tmp, sample_rate, vae_sr)
-                speech_chunks.append(speech_for_vae)
-
-                if extractor is not None:
-                    speech_for_spk = self._resample(speech_tmp, sample_rate, 16000)
-                    raw_emb = extractor(speech_for_spk)
-                    se = self.spk_head(raw_emb.to(device=self.device, dtype=self.dtype))
-                    spk_emb_list.append(se)
-            except (FileNotFoundError, InvalidPromptWavError) as e:
-                # if more than a single wav file exist, skip this failing one
-                if allow_partial:
-                    logger.warning(
-                        "Voice preset '%s': skipping invalid prompt wav %s: %s",
-                        voice_name,
-                        wav_path,
-                        e,
-                    )
-                    continue
-                raise
-
-        if not speech_chunks:
-            raise RuntimeError(f"Failed to register voice preset '{voice_name}': no valid prompt wavs remained")
-
-        if extractor is None and self.audio_vae is None:
-            raise RuntimeError(
-                f"Failed to register voice preset '{voice_name}': neither speaker embeddings "
-                "nor AudioVAE prompt features are available"
-            )
-
-        speech = torch.cat(speech_chunks, dim=-1)
-
-        if self.audio_vae is not None:
-            patch_pt = self.audio_vae.encoder.hop_size * max(1, self.audio_vae.encoder.patch_size) * self.patch_size
-            if speech.shape[-1] % patch_pt != 0:
-                pad_len = (speech.shape[-1] + patch_pt - 1) // patch_pt * patch_pt
-                pad_speech = torch.zeros((speech.shape[0], pad_len), dtype=speech.dtype, device=speech.device)
-                pad_speech[:, -speech.shape[-1] :] = speech
-                speech = pad_speech
-
-            prompt_wav_lat, _ = self.audio_vae.encode_latent(
-                speech.to(dtype=torch.bfloat16, device=self.device),
-                torch.tensor([speech.size(1)], dtype=torch.long, device=self.device),
-            )
-            assert prompt_wav_lat.shape[1] % self.patch_size == 0, (
-                f"AudioVAE latent length is incompatible with patch_size for voice preset '{voice_name}'"
-            )
-            prompt_wav_lat = prompt_wav_lat.reshape(-1, self.patch_size, prompt_wav_lat.shape[-1])
-            prompt_wav_emb = self.aggregator(prompt_wav_lat)
-            prompt_wav_lat = prompt_wav_lat.reshape(1, -1, prompt_wav_lat.shape[-1])
-            prompt_wav_emb = prompt_wav_emb.reshape(1, -1, prompt_wav_emb.shape[-1])
-        else:
-            prompt_wav_lat = None
-            prompt_wav_emb = None
-
-        if voice_name in self.registered_prompts:
-            logger.warning("Voice preset '%s' is being overwritten", voice_name)
-        self.registered_prompts[voice_name] = {
-            "prompt_wav_lat": prompt_wav_lat,
-            "prompt_wav_emb": prompt_wav_emb,
-            "spk_emb": spk_emb_list,
-        }
-        logger.info("Registered voice preset '%s' from %s", voice_name, prompt_wav_paths)
-
-    def _load_voice_presets(self) -> None:
-        """Load voice_name.json and register all voice presets.
-
-        Searches local talker dir first, then downloads voice preset
-        files (voice_name.json + voices/**) from HF hub if needed.
-        """
-        voice_json_path = None
-        base_dir = None
-
-        # Try local paths first
-        for candidate in (self._talker_dir, self._model_path):
-            path = os.path.join(candidate, "data", "voice_name.json")
-            if os.path.isfile(path):
-                voice_json_path = path
-                base_dir = candidate
-                break
-
-        # HF hub fallback: download voice_name.json + all voice wav files
-        if voice_json_path is None and not os.path.isdir(self._model_path):
-            try:
-                hf_root = download_weights_from_hf_specific(
-                    self._model_path,
-                    self.vllm_config.load_config.download_dir,
-                    allow_patterns=["talker/data/**"],
-                    require_all=True,
-                )
-                candidate = os.path.join(hf_root, "talker", "data", "voice_name.json")
-                if os.path.isfile(candidate):
-                    voice_json_path = candidate
-                    base_dir = os.path.join(hf_root, "talker")
-            except Exception as e:
-                logger.info("Could not download voice presets from HF: %s", e)
-
-        if voice_json_path is None:
-            logger.info("No voice_name.json found; voice presets unavailable")
-            return
-
-        with open(voice_json_path) as f:
-            voice_dict = json.load(f)
-
-        for name, info in voice_dict.items():
-            wav_path = info.get("prompt_wav_path", "")
-            prompt_text = info.get("prompt_text", "")
-            if not wav_path:
-                logger.warning("Voice preset '%s' has no prompt_wav_path, skipping", name)
-                continue
-            if not os.path.isabs(wav_path):
-                wav_path = os.path.join(base_dir, wav_path)
-            if not os.path.isfile(wav_path):
-                logger.warning("Voice preset '%s': wav not found at %s, skipping", name, wav_path)
-                continue
-            try:
-                self.register_prompt_wav(name, wav_path)
-                self.registered_prompts[name]["prompt_text"] = prompt_text
-            except Exception as e:
-                logger.warning("Failed to register voice preset '%s': %s", name, e)
-
-    def _cfm_sample_step(self, last_hidden_state, his_lat, cfg=None, sigma=0.25, temperature=0.0):
-        """Run one CFM sampling step: LLM hidden -> audio latent + next embedding + stop."""
-        if cfg is None:
-            cfg = self.cfg_strength
-        sampler_pool = self._get_sampler_pool()
-        if sampler_pool is not None:
-            return sampler_pool.execute(last_hidden_state, his_lat, cfg, sigma, temperature)
-
-        # Fallback: direct computation without CUDA graphs
-        bat_size, his_patch_size, z_dim = his_lat.shape
-        randn_tensor = torch.randn(
-            (bat_size, self.patch_size, z_dim), device=last_hidden_state.device, dtype=last_hidden_state.dtype
-        )
-        t = get_epss_timesteps(self.config.steps, device=last_hidden_state.device, dtype=last_hidden_state.dtype)
-        sde_rnd = torch.randn(
-            (self.config.steps, *randn_tensor.shape), device=last_hidden_state.device, dtype=last_hidden_state.dtype
-        )
-        sde_args = torch.tensor(
-            [cfg, sigma, temperature], device=last_hidden_state.device, dtype=last_hidden_state.dtype
-        )
-
-        gen_lat = self.cfm.sample(last_hidden_state, his_lat, randn_tensor, t, sde_args, sde_rnd)
-        inputs_embeds = self.aggregator(gen_lat)
-        stop_out = self.stop_head(last_hidden_state[:, -1, :]).softmax(dim=-1)
-        return gen_lat, inputs_embeds, stop_out
-
-    @staticmethod
-    def _trim_trailing_silence(
-        waveform: torch.Tensor,
-        sample_rate: int,
-        sil_th: float = 1e-3,
-        tail_silence_s: float = 0.3,
-    ) -> torch.Tensor:
-        """Trim low-energy tail while keeping a short trailing silence."""
-        if waveform.numel() == 0:
-            return waveform
-
-        original_dim = waveform.dim()
-        if original_dim == 3:
-            speech = waveform[:, 0, :]
-        elif original_dim == 2:
-            speech = waveform
-        else:
-            return waveform
-
-        frame_step = int(sample_rate * 0.1)
-        frame_size = int(sample_rate * 0.1)
-        if speech.shape[-1] < frame_size:
-            keep = min(speech.shape[-1], int(tail_silence_s * sample_rate))
-            trimmed = speech[..., :keep]
-        else:
-            num_frame = (speech.shape[-1] - frame_size) // frame_step + 1
-            cur_len = (num_frame - 1) * frame_step + frame_size
-            speech = speech[..., :cur_len]
-            spe_frames = speech.unfold(-1, frame_size, frame_step)
-            scores = spe_frames.abs().mean(dim=-1)
-            scores = scores.mean(dim=list(range(scores.dim() - 1)))
-            idx = scores.shape[0] - 1
-            while idx >= 0 and scores[idx] <= sil_th:
-                idx -= 1
-            if idx < 0:
-                keep = min(speech.shape[-1], int(tail_silence_s * sample_rate))
-                trimmed = speech[..., :keep]
-            else:
-                non_sil_len = idx * frame_step + frame_size + int(tail_silence_s * sample_rate)
-                non_sil_len = min(non_sil_len, speech.shape[-1])
-                trimmed = speech[..., :non_sil_len]
-
-        if original_dim == 3:
-            return trimmed.unsqueeze(1)
-        return trimmed
-
-    def _duration_capped_steps(self, text_len: int, requested_max_steps: int) -> int:
-        """Apply original Ming duration heuristic as an upper bound on decode steps."""
-        if self.audio_vae is None:
-            return requested_max_steps
-
-        sample_rate = float(self.audio_vae.config.sample_rate)
-        vae_patch_size = float(getattr(self.audio_vae.config, "patch_size", 4))
-        hop_size = float(getattr(self.audio_vae.decoder, "hop_length", 320))
-        seconds_per_step = (self.patch_size * vae_patch_size * hop_size) / sample_rate
-        if seconds_per_step <= 0:
-            return requested_max_steps
-
-        max_duration_s = max(2.0, float(text_len) * (5818.0 / 16000.0))
-        max_steps_by_duration = max(1, int(max_duration_s / seconds_per_step))
-        return min(requested_max_steps, max_steps_by_duration)
-
-    @staticmethod
-    def _silence_holder(
-        speech: torch.Tensor,
-        sample_rate: int,
-        sil_cache: dict | None = None,
-        last_chunk: bool = True,
-        sil_th: float = 1e-3,
-        last_sil: float = 0.3,
-    ) -> tuple[torch.Tensor, dict]:
-        """Ming-style silence holder used by streaming decode."""
-        if speech.numel() == 0:
-            return speech, sil_cache or {"holder": [], "buffer": []}
-
-        frame_step = int(sample_rate * 0.1)
-        frame_size = int(sample_rate * 0.1)
-        if sil_cache is None:
-            sil_cache = {"holder": [], "buffer": []}
-
-        if sil_cache["buffer"]:
-            speech = torch.cat([*sil_cache["buffer"], speech], dim=-1)
-            sil_cache["buffer"] = []
-
-        if speech.shape[-1] < frame_size:
-            sil_cache["buffer"].append(speech)
-            if last_chunk:
-                speech = torch.cat(sil_cache["holder"] + sil_cache["buffer"], dim=-1)
-                return speech[..., : int(last_sil * sample_rate)], sil_cache
-            return torch.zeros((*speech.shape[:-1], 0), device=speech.device, dtype=speech.dtype), sil_cache
-
-        num_frame = (speech.shape[-1] - frame_size) // frame_step + 1
-        cur_len = (num_frame - 1) * frame_step + frame_size
-        if speech.shape[-1] > cur_len:
-            sil_cache["buffer"].append(speech[..., cur_len:])
-            speech = speech[..., :cur_len]
-
-        spe_frames = speech.unfold(-1, frame_size, frame_step)
-        scores = spe_frames.abs().mean(dim=-1)
-        scores = scores.mean(dim=list(range(scores.dim() - 1)))
-        idx = scores.shape[0] - 1
-        while idx >= 0 and scores[idx] <= sil_th:
-            idx -= 1
-
-        if idx < 0:
-            sil_cache["holder"].append(speech)
-            if last_chunk:
-                speech = torch.cat(sil_cache["holder"] + sil_cache["buffer"], dim=-1)
-                return speech[..., : int(last_sil * sample_rate)], sil_cache
-            return torch.zeros((*speech.shape[:-1], 0), device=speech.device, dtype=speech.dtype), sil_cache
-
-        non_sil_len = idx * frame_step + frame_size
-        if last_chunk:
-            non_sil_len += int(last_sil * sample_rate)
-        non_sil_len = min(non_sil_len, speech.shape[-1])
-        speech_out = torch.cat([*sil_cache["holder"], speech[..., :non_sil_len]], dim=-1)
-        sil_cache["holder"] = []
-        if non_sil_len < speech.shape[-1]:
-            sil_cache["holder"].append(speech[..., non_sil_len:])
-        return speech_out, sil_cache
-
-    @torch.no_grad()
-    def generate_audio(
-        self,
-        inputs_embeds: torch.Tensor,
-        prompt_wav_lat: torch.Tensor | None = None,
-        min_new_token: int = 10,
-        max_steps: int = 1000,
-        cfg: float | None = None,
-        sigma: float = 0.25,
-        temperature: float = 0.0,
-        use_static_cache: bool = True,
-    ) -> list[torch.Tensor]:
-        """Autoregressive generation loop: LLM + CFM -> audio latents.
-
-        Returns:
-            list of generated latent tensors, each (1, patch_size, latent_dim).
-        """
-        if cfg is None:
-            cfg = self.cfg_strength
-        # Initialize latent history
-        his_lat = torch.zeros(1, self.his_patch_size, self.latent_dim, device=self.device, dtype=self.dtype)
-        if prompt_wav_lat is not None:
-            start_index = self.his_patch_size - prompt_wav_lat.size(1)
-            if start_index < 0:
-                his_lat[:] = prompt_wav_lat[:, -start_index:, :]
-            else:
-                his_lat[:, start_index:, :] = prompt_wav_lat
-
-        max_cache_len = 2048
-        if use_static_cache:
-            past_key_values = StaticCache(
-                config=self.llm_config,
-                max_batch_size=1,
-                max_cache_len=max_cache_len,
-                device=self.device,
-                dtype=self.dtype,
-            )
-        else:
-            past_key_values = None
-
-        prefill_len = inputs_embeds.shape[1]
-        all_latents = []
-
-        for step in range(min(max_steps, max_cache_len - prefill_len)):
-            if step == 0 or not use_static_cache:
-                outputs = self.model(
-                    past_key_values=past_key_values,
-                    inputs_embeds=inputs_embeds,
-                    use_cache=True,
-                )
-            else:
-                past_seen_tokens = past_key_values.get_seq_length()
-                cache_position = torch.arange(
-                    past_seen_tokens,
-                    past_seen_tokens + inputs_embeds.shape[1],
-                    device=inputs_embeds.device,
-                )
-                outputs = self.model(
-                    past_key_values=past_key_values,
-                    inputs_embeds=inputs_embeds,
-                    use_cache=True,
-                    cache_position=cache_position,
-                )
-
-            last_hs = outputs.last_hidden_state[:, -1:, :]
-            gen_lat, inputs_embeds, stop_out = self._cfm_sample_step(last_hs, his_lat, cfg, sigma, temperature)
-
-            # Update latent history
-            if self.his_patch_size == self.patch_size:
-                his_lat = gen_lat
-            elif self.his_patch_size > self.patch_size:
-                his_lat = torch.cat([his_lat[:, self.patch_size - self.his_patch_size :], gen_lat], dim=1)
-            else:
-                raise NotImplementedError(f"his_patch_size ({self.his_patch_size}) < patch_size ({self.patch_size})")
-
-            all_latents.append(gen_lat)
-
-            stop_prob = stop_out.cpu()[0, 1].item()
-            if step % 50 == 0 or step < 5:
-                logger.info(
-                    "step=%d stop_prob=%.4f hs_norm=%.4f lat_norm=%.4f emb_norm=%.4f",
-                    step,
-                    stop_prob,
-                    last_hs.float().norm().item(),
-                    gen_lat.float().norm().item(),
-                    inputs_embeds.float().norm().item(),
-                )
-
-            if step > min_new_token and stop_prob > 0.5:
-                logger.info("Stopping at step %d with stop_prob=%.4f", step, stop_prob)
-                break
-
-        return all_latents
-
-    def decode_latents_to_waveform(self, latents: list[torch.Tensor], stream_decode: bool = True) -> torch.Tensor:
-        """Decode accumulated latents to waveform via AudioVAE."""
-        if self.audio_vae is None:
-            raise RuntimeError("AudioVAE not loaded. Cannot decode audio latents to waveform.")
-
-        if stream_decode:
-            sr = int(self.audio_vae.config.sample_rate)
-            vae_cache = {"past_key_values": None, "stream_state": (None, None, None)}
-            sil_cache = None
-            wav_chunks: list[torch.Tensor] = []
-            for i, lat in enumerate(latents):
-                last_chunk = i == (len(latents) - 1)
-                speech, stream_state, past_key_values = self.audio_vae.decode(
-                    lat,
-                    past_key_values=vae_cache["past_key_values"],
-                    use_cache=True,
-                    stream_state=vae_cache["stream_state"],
-                    last_chunk=last_chunk,
-                )
-                vae_cache = {"past_key_values": past_key_values, "stream_state": stream_state}
-                speech_chunk = speech[0].detach().float()
-                speech_chunk, sil_cache = self._silence_holder(
-                    speech_chunk,
-                    sr,
-                    sil_cache=sil_cache,
-                    last_chunk=last_chunk,
-                )
-                if speech_chunk.numel() > 0:
-                    wav_chunks.append(speech_chunk)
-
-            if not wav_chunks:
-                return torch.zeros((1, 1, 0), device=self.device, dtype=self.dtype)
-            waveform = torch.cat(wav_chunks, dim=-1).unsqueeze(0)
-            return waveform
-
-        all_lat = torch.cat(latents, dim=1)  # (1, total_patches * patch_size, latent_dim)
-        waveform, _, _ = self.audio_vae.decode(
-            all_lat, use_cache=False, stream_state=(None, None, None), last_chunk=True
-        )
-        return waveform  # (1, 1, T_wav)
-
-    def build_tts_input(
-        self,
-        text: str,
-        prompt: str = "Please generate speech based on the following description.\n",
-        spk_emb: list[torch.Tensor] | None = None,
-        instruction: str | None = None,
-        prompt_text: str | None = None,
-        prompt_wav_emb: torch.Tensor | None = None,
-    ) -> tuple[torch.Tensor, torch.Tensor]:
-        """Build input embeddings for TTS generation.
-
-        Returns (inputs_embeds, input_ids) for the generation loop.
-        """
-        tokenizer = self.tokenizer
-
-        # Speaker embedding prompt tokens
-        spk_emb_prompt = []
-        if spk_emb is not None:
-            for i, se in enumerate(spk_emb):
-                spk_emb_prompt.extend(
-                    tokenizer.encode(f"  speaker_{i + 1}:")
-                    + tokenizer.encode("<|vision_start|>")
-                    + tokenizer.encode("<|vision_pad|>")
-                    + tokenizer.encode("<|vision_end|>\n")
-                )
-
-        # Instruction tokens
-        instruction_prompt = []
-        if instruction is not None:
-            instruction_prompt = tokenizer.encode(instruction) + tokenizer.encode("<|im_end|>")
-
-        # Zero-shot prompt tokens
-        prompt_text_token = []
-        prompt_latent_token = []
-        if prompt_wav_emb is not None and prompt_text is not None:
-            prompt_text_token = tokenizer.encode(prompt_text)
-            prompt_latent_token = tokenizer.encode("<audioPatch>") * prompt_wav_emb.size(1)
-
-        # Text input prefix
-        prompt2 = tokenizer.encode(" Text input:\n")
-        if (
-            "Genre: " in text
-            and "Mood: " in text
-            and "Instrument: " in text
-            and "Theme: " in text
-            and "Duration: " in text
-        ):
-            prompt2 = []
-
-        input_part = (
-            tokenizer.encode("<|im_start|>system\nYou are a helpful assistant.<|im_end|>\n")
-            + tokenizer.encode("<|im_start|>user\n")
-            + tokenizer.encode(prompt)
-            + spk_emb_prompt
-            + prompt2
-            + prompt_text_token
-            + tokenizer.encode(text)
-            + tokenizer.encode("<|im_end|>\n")
-            + tokenizer.encode("<|im_start|>assistant\n")
-            + instruction_prompt
-            + tokenizer.encode("<audio>")
-            + prompt_latent_token
-        )
-
-        input_ids = torch.tensor(input_part, dtype=torch.long).unsqueeze(0).to(self.device)
-        inputs_embeds = self.model.get_input_embeddings()(input_ids).to(self.device, dtype=torch.bfloat16)
-
-        # Inject speaker embeddings at <|vision_start|> positions
-        if spk_emb is not None:
-            spk_token_id = tokenizer.encode("<|vision_start|>")
-            assert len(spk_token_id) == 1
-            spk_indices = torch.where(input_ids[0] == spk_token_id[0])[0]
-            assert len(spk_indices) > 0
-            for i, se in enumerate(spk_emb):
-                inputs_embeds[0, spk_indices[i] + 1] = se
-
-        # Inject prompt wav embeddings after <audio> token
-        if prompt_wav_emb is not None and prompt_text is not None:
-            audio_token_id = tokenizer.encode("<audio>")
-            assert len(audio_token_id) == 1
-            audio_indices = torch.where(input_ids[0] == audio_token_id[0])[0]
-            assert len(audio_indices) > 0
-            inputs_embeds[0, audio_indices[0] + 1 : audio_indices[0] + 1 + prompt_wav_emb.size(1), :] = prompt_wav_emb[
-                0
-            ]
-
-        return inputs_embeds, input_ids
-
-    def get_dummy_runtime_additional_information(
-        self,
-        num_reqs: int,
-    ) -> list[dict[str, object]]:
-        info: dict[str, object] = {
-            "text": "dummy",
-            "use_zero_spk_emb": True,
-            "max_steps": 1,
-        }
-        return [info for _ in range(num_reqs)]
-
-    def compute_logits(
-        self,
-        hidden_states: torch.Tensor,
-        sampling_metadata=None,
-    ) -> torch.Tensor | None:
+    def compute_logits(self, hidden_states: torch.Tensor, sampling_metadata=None) -> torch.Tensor | None:
         return None
 
-    def sample(
-        self,
-        logits: torch.Tensor,
-        sampling_metadata,
-    ):
+    def sample(self, logits: torch.Tensor, sampling_metadata):
         return None
 
     def embed_input_ids(
@@ -906,6 +289,15 @@ class MingFlashOmniTalkerForConditionalGeneration(nn.Module, CustomProcessMixin)
         is_multimodal=None,
     ) -> torch.Tensor:
         return self.model.get_input_embeddings()(input_ids)
+
+    def make_empty_intermediate_tensors(
+        self, batch_size: int, dtype: torch.dtype, device: torch.device
+    ) -> IntermediateTensors | None:
+        return None
+
+    def get_dummy_runtime_additional_information(self, num_reqs: int) -> list[dict[str, object]]:
+        info: dict[str, object] = {"text": "dummy", "use_zero_spk_emb": True, "max_steps": 1}
+        return [info for _ in range(num_reqs)]
 
     def forward(
         self,
@@ -918,40 +310,38 @@ class MingFlashOmniTalkerForConditionalGeneration(nn.Module, CustomProcessMixin)
     ) -> OmniOutput:
         """Run TTS generation and return audio output.
 
-        For the talker, the full autoregressive generation loop is
-        executed inside forward method.
+        The full autoregressive generation loop is executed inside this method.
         """
-        if runtime_additional_information and len(runtime_additional_information) > 0:
-            additional_info = runtime_additional_information[0] or {}
-        else:
-            additional_info = {}
+        additional_info = self._extract_additional_info(runtime_additional_information)
+        params = self._resolve_generation_params(additional_info)
+        voice = self._resolve_voice(additional_info)
 
+        latents = self._generate_latents(
+            input_ids=input_ids,
+            inputs_embeds=inputs_embeds,
+            text=additional_info.get("text", ""),
+            params=params,
+            voice=voice,
+        )
+        return self._decode_to_output(latents, stream_decode=params.stream_decode)
+
+    @staticmethod
+    def _extract_additional_info(
+        runtime_additional_information: list[dict] | None,
+    ) -> dict[str, Any]:
+        if runtime_additional_information and len(runtime_additional_information) > 0:
+            return runtime_additional_information[0] or {}
+        return {}
+
+    def _resolve_generation_params(self, additional_info: dict[str, Any]) -> _GenerationParams:
         # "omni"    : thinker -> talker hand-off with hardcoded defaults
         # "instruct": standalone TTS with caller-supplied sampling knobs
         ming_task = additional_info.get("ming_task", "instruct")
 
-        text = additional_info.get("text", "")
-        spk_emb = additional_info.get("spk_emb", None)
-        prompt_text = additional_info.get("prompt_text", None)
-        prompt_wav_lat = additional_info.get("prompt_wav_lat", None)
-        prompt_wav_emb = additional_info.get("prompt_wav_emb", None)
-
-        # Resolve voice preset
-        voice_name = additional_info.get("voice_name", None)
-        spk_emb_already_projected = False
-        if voice_name and voice_name in self.registered_prompts and spk_emb is None:
-            preset = self.registered_prompts[voice_name]
-            prompt_wav_lat = preset["prompt_wav_lat"]
-            prompt_wav_emb = preset["prompt_wav_emb"]
-            spk_emb = preset["spk_emb"]
-            spk_emb_already_projected = True
-            if prompt_text is None:
-                prompt_text = preset.get("prompt_text")
-
         if ming_task == "omni":
             prompt = MING_DEFAULT_PROMPT
             instruction = None
-            use_zero_spk_emb = spk_emb is None
+            use_zero_spk_emb = additional_info.get("spk_emb") is None
             cfg = 2.0
             sigma = 0.25
             temperature = 0.0
@@ -964,102 +354,181 @@ class MingFlashOmniTalkerForConditionalGeneration(nn.Module, CustomProcessMixin)
             sigma = additional_info.get("sigma", 0.25)
             temperature = additional_info.get("temperature", 0.0)
             max_steps = int(additional_info.get("max_steps", additional_info.get("max_decode_steps", 200)))
-        max_text_length = int(additional_info.get("max_text_length", 50))
-        use_static_cache = bool(additional_info.get("use_static_cache", True))
-        stream_decode = bool(additional_info.get("stream_decode", True))
 
-        if inputs_embeds is None:
-            # Process speaker embedding through spk_head once and reuse across segments.
-            processed_spk_emb = None
-            if spk_emb is not None:
-                if spk_emb_already_projected:
-                    # Preset-resolved embeddings are already projected
-                    processed_spk_emb = spk_emb if isinstance(spk_emb, list) else [spk_emb]
-                else:
-                    # Normalize to list[Tensor]
-                    if isinstance(spk_emb, torch.Tensor):
-                        spk_emb_tensors = [spk_emb]
-                    elif isinstance(spk_emb, list) and spk_emb and isinstance(spk_emb[0], (int, float)):
-                        spk_emb_tensors = [torch.tensor(spk_emb, dtype=self.dtype).unsqueeze(0)]
-                    elif isinstance(spk_emb, list):
-                        spk_emb_tensors = spk_emb
-                    else:
-                        spk_emb_tensors = [spk_emb]
-                    processed_spk_emb = [
-                        self.spk_head(se.to(device=self.device, dtype=self.dtype)) for se in spk_emb_tensors
-                    ]
-            elif use_zero_spk_emb:
-                processed_spk_emb = [torch.zeros(1, self.hidden_size, device=self.device, dtype=self.dtype)]
+        return _GenerationParams(
+            prompt=prompt,
+            instruction=instruction,
+            cfg=cfg,
+            sigma=sigma,
+            temperature=temperature,
+            max_steps=max_steps,
+            use_zero_spk_emb=use_zero_spk_emb,
+            max_text_length=int(additional_info.get("max_text_length", 50)),
+            use_static_cache=bool(additional_info.get("use_static_cache", True)),
+            stream_decode=bool(additional_info.get("stream_decode", True)),
+        )
 
-            text_segments = segment_and_normalize(text, max_length=max_text_length) if text else []
-            if not text_segments:
-                # vLLM passes 1D input_ids (num_tokens,) while Qwen2Model expects (batch, seq_len, hidden_size)
-                inputs_embeds = self.model.get_input_embeddings()(input_ids.to(self.device)).unsqueeze(0)
-                text_segments = [""]
+    def _resolve_voice(self, additional_info: dict[str, Any]) -> _VoiceContext:
+        spk_emb = additional_info.get("spk_emb", None)
+        prompt_text = additional_info.get("prompt_text", None)
+        prompt_wav_lat = additional_info.get("prompt_wav_lat", None)
+        prompt_wav_emb = additional_info.get("prompt_wav_emb", None)
+        already_projected = False
 
-            all_segment_latents: list[torch.Tensor] = []
-            for text_segment in text_segments:
-                if text_segment:
-                    inputs_embeds, _ = self.build_tts_input(
-                        text=text_segment,
-                        prompt=prompt,
-                        spk_emb=processed_spk_emb,
-                        instruction=instruction,
-                        prompt_text=prompt_text,
-                        prompt_wav_emb=prompt_wav_emb,
-                    )
-                effective_max_steps = self._duration_capped_steps(len(text_segment), max_steps)
-                segment_latents = self.generate_audio(
-                    inputs_embeds=inputs_embeds,
-                    prompt_wav_lat=prompt_wav_lat,
-                    max_steps=effective_max_steps,
-                    cfg=cfg,
-                    sigma=sigma,
-                    temperature=temperature,
-                    use_static_cache=use_static_cache,
-                )
-                all_segment_latents.extend(segment_latents)
-            latents = all_segment_latents
+        voice_name = additional_info.get("voice_name", None)
+        if voice_name and spk_emb is None and voice_name in self.voice_presets:
+            preset = self.voice_presets.get(voice_name) or {}
+            prompt_wav_lat = preset.get("prompt_wav_lat")
+            prompt_wav_emb = preset.get("prompt_wav_emb")
+            spk_emb = preset.get("spk_emb")
+            already_projected = True
+            if prompt_text is None:
+                prompt_text = preset.get("prompt_text")
+
+        return _VoiceContext(
+            spk_emb=spk_emb,
+            prompt_text=prompt_text,
+            prompt_wav_lat=prompt_wav_lat,
+            prompt_wav_emb=prompt_wav_emb,
+            already_projected=already_projected,
+        )
+
+    def _project_spk_emb(
+        self, spk_emb: Any, already_projected: bool, use_zero_spk_emb: bool
+    ) -> list[torch.Tensor] | None:
+        if spk_emb is None:
+            if use_zero_spk_emb:
+                return [torch.zeros(1, self.hidden_size, device=self.device, dtype=self.dtype)]
+            return None
+
+        if already_projected:
+            return spk_emb if isinstance(spk_emb, list) else [spk_emb]
+
+        if isinstance(spk_emb, torch.Tensor):
+            tensors = [spk_emb]
+        elif isinstance(spk_emb, list) and spk_emb and isinstance(spk_emb[0], (int, float)):
+            tensors = [torch.tensor(spk_emb, dtype=self.dtype).unsqueeze(0)]
+        elif isinstance(spk_emb, list):
+            tensors = spk_emb
         else:
-            latents = self.generate_audio(
+            tensors = [spk_emb]
+        return [self.spk_head(t.to(device=self.device, dtype=self.dtype)) for t in tensors]
+
+    def _generate_latents(
+        self,
+        *,
+        input_ids: torch.Tensor,
+        inputs_embeds: torch.Tensor | None,
+        text: str,
+        params: _GenerationParams,
+        voice: _VoiceContext,
+    ) -> list[torch.Tensor]:
+        generator = self.audio_generator
+
+        if inputs_embeds is not None:
+            # Caller pre-built embeddings — run a single AR pass.
+            return generator.generate_latents(
                 inputs_embeds=inputs_embeds,
-                prompt_wav_lat=prompt_wav_lat,
-                max_steps=max_steps,
-                cfg=cfg,
-                sigma=sigma,
-                temperature=temperature,
-                use_static_cache=use_static_cache,
+                prompt_wav_lat=voice.prompt_wav_lat,
+                max_steps=params.max_steps,
+                cfg=params.cfg,
+                sigma=params.sigma,
+                temperature=params.temperature,
+                use_static_cache=params.use_static_cache,
             )
 
-        # Decode to waveform if AudioVAE is available
-        multimodal_outputs = {}
+        spk_emb = self._project_spk_emb(voice.spk_emb, voice.already_projected, params.use_zero_spk_emb)
+        text_segments = segment_and_normalize(text, max_length=params.max_text_length) if text else []
+
+        if not text_segments:
+            # vLLM passes 1D input_ids; Qwen2Model expects (batch, seq).
+            inputs_embeds = self.model.get_input_embeddings()(input_ids.to(self.device)).unsqueeze(0)
+            return generator.generate_latents(
+                inputs_embeds=inputs_embeds,
+                prompt_wav_lat=voice.prompt_wav_lat,
+                max_steps=params.max_steps,
+                cfg=params.cfg,
+                sigma=params.sigma,
+                temperature=params.temperature,
+                use_static_cache=params.use_static_cache,
+            )
+
+        all_latents: list[torch.Tensor] = []
+        for segment in text_segments:
+            seg_embeds, _ = build_tts_input(
+                tokenizer=self.tokenizer,
+                embed_tokens=self.model.get_input_embeddings(),
+                device=self.device,
+                dtype=torch.bfloat16,
+                text=segment,
+                prompt=params.prompt,
+                spk_emb=spk_emb,
+                instruction=params.instruction,
+                prompt_text=voice.prompt_text,
+                prompt_wav_emb=voice.prompt_wav_emb,
+            )
+            effective_max_steps = generator.duration_capped_steps(len(segment), params.max_steps)
+            all_latents.extend(
+                generator.generate_latents(
+                    inputs_embeds=seg_embeds,
+                    prompt_wav_lat=voice.prompt_wav_lat,
+                    max_steps=effective_max_steps,
+                    cfg=params.cfg,
+                    sigma=params.sigma,
+                    temperature=params.temperature,
+                    use_static_cache=params.use_static_cache,
+                )
+            )
+        return all_latents
+
+    def _decode_to_output(self, latents: list[torch.Tensor], *, stream_decode: bool) -> OmniOutput:
+        multimodal_outputs: dict[str, Any] = {}
         if latents and self.audio_vae is not None:
-            waveform = self.decode_latents_to_waveform(latents, stream_decode=stream_decode)
+            waveform = self.audio_generator.decode_to_waveform(latents, stream_decode=stream_decode)
             if not stream_decode:
-                waveform = self._trim_trailing_silence(waveform, int(self.audio_vae.config.sample_rate))
+                waveform = self.audio_generator.trim_trailing_silence(waveform)
             multimodal_outputs["audio"] = waveform.detach().float().cpu()
             multimodal_outputs["sr"] = torch.tensor(self.audio_vae.config.sample_rate)
         elif latents:
-            # Return raw latents if no AudioVAE
             all_lat = torch.cat(latents, dim=1)
             multimodal_outputs["audio_latents"] = all_lat.detach().float().cpu()
 
-        return OmniOutput(
-            text_hidden_states=None,
-            multimodal_outputs=multimodal_outputs,
+        return OmniOutput(text_hidden_states=None, multimodal_outputs=multimodal_outputs)
+
+    def load_weights(self, weights: Iterable[tuple[str, torch.Tensor]]) -> set[str]:
+        """Load weights for all talker components.
+
+        The talker's HF checkpoint (talker/model.safetensors) stores
+        weights with prefixes matching this module's submodule names directly.
+        And AudioVAE weights live in a separate file under talker/vae/
+        """
+        # Standalone: bypass the default loader's iterator (torch.load on
+        # .safetensors crashes) and read talker/model*.safetensors directly.
+        if self._standalone:
+            weights = self._iter_talker_safetensors()
+
+        loader = AutoWeightsLoader(
+            self,
+            skip_prefixes=["audio_vae."],  # loaded separately
+            skip_substrs=["rotary_embed.inv_freq"],  # non-persistent buffer
         )
+        loaded = loader.load_weights(weights)
+        logger.info("Loaded %d talker weights from checkpoint", len(loaded))
+
+        if self.audio_vae is not None and self._vae_weight_source is not None:
+            loaded.update(self._load_vae_weights())
+
+        # Register voice presets after all weights (incl. VAE) are loaded.
+        try:
+            self.voice_presets.load_presets_from_manifest(device=self.device, dtype=self.dtype)
+        except Exception as e:  # pragma: no cover — best-effort
+            logger.warning("Voice preset loading failed (non-fatal): %s", e)
+
+        return loaded
 
     def _iter_talker_safetensors(self) -> Iterable[tuple[str, torch.Tensor]]:
-        """Yield (name, tensor) pairs from talker/model*.safetensors.
-
-        Upstream ``_prepare_weights`` only sets ``use_safetensors=True`` for
-        the exact glob ``"*.safetensors"``, not subdirectory patterns like
-        ``"talker/model*.safetensors"``.  Loading .safetensors with
-        ``pt_weights_iterator`` (torch.load) crashes, so we read them
-        directly via safetensors.torch.load_file.
-        """
+        """Yield (name, tensor) pairs from talker/model*.safetensors."""
         model_path = self._model_path
-
         # Try local path first
         for candidate in (os.path.join(model_path, "talker"), model_path):
             sf_files = sorted(glob_module.glob(os.path.join(candidate, "model*.safetensors")))
@@ -1080,42 +549,6 @@ class MingFlashOmniTalkerForConditionalGeneration(nn.Module, CustomProcessMixin)
             raise RuntimeError(f"No talker safetensors found under {model_root}. Expected talker/model*.safetensors.")
         for sf_path in sf_files:
             yield from load_file(sf_path, device="cpu").items()
-
-    def load_weights(self, weights: Iterable[tuple[str, torch.Tensor]]) -> set[str]:
-        """Load weights for all talker components.
-
-        The talker's HF checkpoint (talker/model.safetensors) stores weights
-        with prefixes matching this module's submodule names directly:
-        model.*, cfm.*, aggregator.*, stop_head.*, spk_head.*.
-
-        AudioVAE weights live in a separate file (talker/vae/model.safetensors)
-        and are loaded separately via _load_vae_weights().
-        """
-        # When standalone, bypass the default loader's weight iterator
-        # (which would try pt_weights_iterator on .safetensors files)
-        # and load directly from talker/model*.safetensors.
-        if self._standalone:
-            weights = self._iter_talker_safetensors()
-
-        loader = AutoWeightsLoader(
-            self,
-            skip_prefixes=["audio_vae."],  # loaded separately
-            skip_substrs=["rotary_embed.inv_freq"],  # non-persistent buffer
-        )
-        loaded = loader.load_weights(weights)
-        logger.info("Loaded %d talker weights from checkpoint", len(loaded))
-
-        # Load AudioVAE weights from separate safetensors file
-        if self.audio_vae is not None and self._vae_weight_source is not None:
-            loaded.update(self._load_vae_weights())
-
-        # Register voice presets after all weights (including VAE) are loaded
-        try:
-            self._load_voice_presets()
-        except Exception as e:
-            logger.warning("Voice preset loading failed (non-fatal): %s", e)
-
-        return loaded
 
     def _load_vae_weights(self) -> set[str]:
         """Load AudioVAE weights from talker/vae/model.safetensors."""
@@ -1149,13 +582,8 @@ class MingFlashOmniTalkerForConditionalGeneration(nn.Module, CustomProcessMixin)
         loaded: set[str] = set()
         for sf_path in safetensors_files:
             file_weights = load_file(sf_path, device="cpu")
-            matched_weights = ((name, tensor) for name, tensor in file_weights.items() if name in vae_state_keys)
-            loaded.update(f"audio_vae.{name}" for name in vae_loader.load_weights(matched_weights))
+            matched = ((name, tensor) for name, tensor in file_weights.items() if name in vae_state_keys)
+            loaded.update(f"audio_vae.{name}" for name in vae_loader.load_weights(matched))
 
         logger.info("Loaded %d AudioVAE weights from %s", len(loaded), source)
         return loaded
-
-    def make_empty_intermediate_tensors(
-        self, batch_size: int, dtype: torch.dtype, device: torch.device
-    ) -> IntermediateTensors | None:
-        return None
