@@ -45,9 +45,10 @@ Adjust `devices` in the YAML to match your hardware.
 
 - OS: Linux
 - Python: 3.10+
-- Driver / runtime:
-- vLLM version:
-- vLLM-Omni version or commit:
+- CUDA Driver Version: 590.48.01
+- CUDA 12.5
+- vLLM version: 0.19.0
+- vLLM-Omni version or commit: 0.19.0rc1
 
 #### Command
 
@@ -116,11 +117,11 @@ curl http://localhost:8091/v1/chat/completions \
         {"role": "system", "content": [{"type": "text", "text": "你是一个友好的AI助手。\n\ndetailed thinking off"}]},
         {"role": "user", "content": [
           {"type": "audio_url", "audio_url": {"url": "https://vllm-public-assets.s3.us-west-2.amazonaws.com/multimodal_asset/mary_had_lamb.ogg"}},
-          {"type": "text", "text": "Please recognize the language of this speech and transcribe it."}
+          {"type": "text", "text": "Please recognize the language of this speech and transcribe it. Format: oral."}
         ]}
       ],
       "modalities": ["text", "audio"]
-    }' | jq -r '.choices[0].message.audio.data' | base64 -d > ming_omni_audio_in.wav
+    }' | jq -r '.choices[0].message.content'
 ```
 
 Streaming text output via SSE (set `"stream": true`):
@@ -160,9 +161,10 @@ The bundled `ming_flash_omni_tts.yaml` runs the talker on a single GPU and expos
 
 - OS: Linux
 - Python: 3.10+
-- Driver / runtime:
-- vLLM version:
-- vLLM-Omni version or commit:
+- CUDA Driver Version: 590.48.01
+- CUDA 12.5
+- vLLM version: 0.19.0
+- vLLM-Omni version or commit: 0.19.0rc1
 
 #### Command
 
