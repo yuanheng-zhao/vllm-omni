@@ -23,54 +23,31 @@ The default `--omni` flag runs thinker only.  For omni-speech, pass the two-stag
 
 ## Run examples
 
-### Text-only
+The end-to-end script defaults to built-in assets; pass `--image-path`,
+`--audio-path`, or `--video-path` to override.
+
 ```bash
+# Text-only
 python examples/offline_inference/ming_flash_omni/end2end.py --query-type text
+
+# Image / audio / video / mixed understanding
+python examples/offline_inference/ming_flash_omni/end2end.py --query-type use_image
+python examples/offline_inference/ming_flash_omni/end2end.py --query-type use_audio
+python examples/offline_inference/ming_flash_omni/end2end.py --query-type use_video --num-frames 16
+python examples/offline_inference/ming_flash_omni/end2end.py --query-type use_mixed_modalities \
+    --image-path /path/to/image.jpg --audio-path /path/to/audio.wav
 ```
 
 #### Reasoning (Thinking Mode)
 
-Reasoning (Thinking) mode is enabled via applying "detailed thinking on" when building the system prompt template (in `apply_chat_template`).
-
-In the end2end example, a default problem for thinking mode is provided, as referred to the example usage of Ming's cookbook;
-To utilize it, you have to download the example figure from https://github.com/inclusionAI/Ming/blob/3954fcb880ff5e61ff128bcf7f1ec344d46a6fe3/figures/cases/3_0.png
+Reasoning ("detailed thinking on") is applied by the script when
+`--query-type reasoning` is set. The default prompt matches Ming's cookbook
+and expects the reference figure from the upstream repo — see
+`get_reasoning_query` in `end2end.py`.
 
 ```bash
 python examples/offline_inference/ming_flash_omni/end2end.py -q reasoning --image-path ./3_0.png
 ```
-
-### Image understanding
-```bash
-python examples/offline_inference/ming_flash_omni/end2end.py --query-type use_image
-
-# With a local image
-python examples/offline_inference/ming_flash_omni/end2end.py --query-type use_image --image-path /path/to/image.jpg
-```
-
-### Audio understanding
-```bash
-python examples/offline_inference/ming_flash_omni/end2end.py --query-type use_audio
-
-# With a local audio file
-python examples/offline_inference/ming_flash_omni/end2end.py --query-type use_audio --audio-path /path/to/audio.wav
-```
-
-### Video understanding
-```bash
-python examples/offline_inference/ming_flash_omni/end2end.py --query-type use_video
-
-# With a local video and custom frame count
-python examples/offline_inference/ming_flash_omni/end2end.py --query-type use_video --video-path /path/to/video.mp4 --num-frames 16
-```
-
-### Mixed modalities (image + audio)
-```bash
-python examples/offline_inference/ming_flash_omni/end2end.py --query-type use_mixed_modalities \
-    --image-path /path/to/image.jpg \
-    --audio-path /path/to/audio.wav
-```
-
-If media file paths are not provided, the script uses built-in default assets.
 
 ### Omni-speech (thinker + talker)
 
@@ -107,11 +84,8 @@ The stage config allocates thinker on GPUs 0–3 and talker on GPU 3 by default.
 | `audio` | Text (internal) | Runs | `<id>.wav` |
 | `text,audio` | Text | Runs | `<id>.txt` + `<id>.wav` |
 
-### Custom stage config
-```bash
-python examples/offline_inference/ming_flash_omni/end2end.py --query-type use_image \
-    --stage-configs-path /path/to/your_config.yaml
-```
+Pass `--stage-configs-path /path/to/your_config.yaml` to any of the commands
+above to override the stage config.
 
 ## Online serving
 

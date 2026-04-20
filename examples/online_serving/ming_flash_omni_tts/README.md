@@ -27,7 +27,7 @@ vllm serve Jonathan1909/Ming-flash-omni-2.0 \
 
 ## Send TTS Request
 
-### Python client
+Python client:
 
 ```bash
 python examples/online_serving/ming_flash_omni_tts/speech_client.py \
@@ -35,23 +35,7 @@ python examples/online_serving/ming_flash_omni_tts/speech_client.py \
     --output ming_online.wav
 ```
 
-### curl
-
-```bash
-curl -X POST http://localhost:8091/v1/audio/speech \
-    -H "Content-Type: application/json" \
-    -d '{
-        "model": "Jonathan1909/Ming-flash-omni-2.0",
-        "input": "我会一直在这里陪着你，直到你慢慢、慢慢地沉入那个最温柔的梦里……好吗？",
-        "response_format": "wav"
-    }' --output ming_online.wav
-```
-
-### Style control
-
-The OpenAI `instructions` field is forwarded to the talker as the
-`风格` (style) entry of the caption JSON — the same slot used by the
-offline `style` case. For example:
+Long-form `instructions` (e.g. ASMR whisper style) via the client:
 
 ```bash
 python examples/online_serving/ming_flash_omni_tts/speech_client.py \
