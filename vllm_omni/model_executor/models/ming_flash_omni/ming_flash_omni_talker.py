@@ -11,8 +11,10 @@ import json
 import os
 from collections.abc import Iterable
 
+import soundfile as sf
 import torch
 import torch.nn as nn
+from safetensors.torch import load_file
 from transformers import AutoTokenizer, Qwen2Config, Qwen2Model, StaticCache
 from transformers.utils.hub import cached_file
 from vllm.config import VllmConfig
@@ -27,12 +29,18 @@ from vllm_omni.transformers_utils.configs.ming_flash_omni import MingFlashOmniTa
 
 from .audio_vae import AudioVAE, AudioVAEConfig
 from .prompt_utils import DEFAULT_PROMPT as MING_DEFAULT_PROMPT
+from .spk_embedding import SpkembExtractor
 from .talker_modules.aggregator import Aggregator
 from .talker_modules.cfm import CFM, get_epss_timesteps
 from .talker_modules.cfm_graph_executor import CFMGraphExecutorPool
 from .talker_modules.dit import DiT
+from .text_processing import segment_and_normalize
 
 logger = init_logger(__name__)
+
+
+class InvalidPromptWavError(ValueError):
+    """Prompt wav failed local validation and can be skipped in list mode."""
 
 
 class MingFlashOmniTalkerForConditionalGeneration(nn.Module, CustomProcessMixin):
@@ -280,8 +288,6 @@ class MingFlashOmniTalkerForConditionalGeneration(nn.Module, CustomProcessMixin)
     def _get_spkemb_extractor(self):
         """Lazily initialize the CAMPPlus speaker embedding extractor."""
         if self._spkemb_extractor is None:
-            from .spk_embedding import SpkembExtractor
-
             campplus_path = None
             for candidate in (self._talker_dir, self._model_path):
                 path = os.path.join(candidate, "campplus.onnx")
@@ -302,10 +308,22 @@ class MingFlashOmniTalkerForConditionalGeneration(nn.Module, CustomProcessMixin)
     @torch.no_grad()
     def _resample(self, waveform: torch.Tensor, orig_sr: int, target_sr: int) -> torch.Tensor:
         """Resample waveform using linear interpolation (no torchaudio needed)."""
+        if orig_sr <= 0:
+            raise ValueError(f"orig_sr must be positive, got {orig_sr}")
+        if target_sr <= 0:
+            raise ValueError(f"target_sr must be positive, got {target_sr}")
+        if waveform.numel() == 0 or waveform.shape[-1] == 0:
+            raise ValueError("waveform must contain at least one sample")
         if orig_sr == target_sr:
             return waveform
+
         ratio = target_sr / orig_sr
         new_len = int(waveform.shape[-1] * ratio)
+        if new_len <= 0:
+            raise ValueError(
+                f"resampled waveform would be empty for input length {waveform.shape[-1]}, "
+                f"orig_sr={orig_sr}, target_sr={target_sr}"
+            )
         return torch.nn.functional.interpolate(
             waveform.unsqueeze(0),
             size=new_len,
@@ -319,31 +337,81 @@ class MingFlashOmniTalkerForConditionalGeneration(nn.Module, CustomProcessMixin)
         Extracts and caches spk_emb, prompt_wav_lat, and prompt_wav_emb
         for reuse across requests.
         """
-        import soundfile as sf
-
+        if not isinstance(voice_name, str) or not voice_name.strip():
+            raise ValueError("voice_name must be a non-empty string")
         if isinstance(prompt_wav_path, str):
-            prompt_wav_path = [prompt_wav_path]
+            prompt_wav_paths = [prompt_wav_path]
+        elif isinstance(prompt_wav_path, list):
+            prompt_wav_paths = prompt_wav_path
+        else:
+            raise TypeError("prompt_wav_path must be a string path or a list of string paths")
 
+        prompt_wav_paths = [path.strip() for path in prompt_wav_paths]
+        if not prompt_wav_paths or any(not path for path in prompt_wav_paths):
+            raise ValueError("Provided audio path is invalid")
+
+        allow_partial = len(prompt_wav_paths) > 1
         extractor = self._get_spkemb_extractor()
         vae_sr = int(self.audio_vae.config.sample_rate) if self.audio_vae else 44100
+        if self.audio_vae is None:
+            logger.warning(f"Voice preset '{voice_name}' being registered without AudioVAE features...")
 
         speech_chunks = []
         spk_emb_list = []
-        for wav_path in prompt_wav_path:
-            data, sample_rate = sf.read(wav_path, dtype="float32")
-            speech_tmp = torch.from_numpy(data)
-            if speech_tmp.ndim == 1:
-                speech_tmp = speech_tmp.unsqueeze(0)
-            else:
-                speech_tmp = speech_tmp.T
+        for wav_path in prompt_wav_paths:
+            try:
+                if not os.path.isfile(wav_path):
+                    raise FileNotFoundError(f"prompt wav not found: {wav_path}")
 
-            speech_for_vae = self._resample(speech_tmp, sample_rate, vae_sr)
-            speech_chunks.append(speech_for_vae)
+                data, sample_rate = sf.read(wav_path, dtype="float32")
 
-            speech_for_spk = self._resample(speech_tmp, sample_rate, 16000)
-            raw_emb = extractor(speech_for_spk)
-            se = self.spk_head(raw_emb.to(device=self.device, dtype=self.dtype))
-            spk_emb_list.append(se)
+                speech_tmp = torch.from_numpy(data)
+                if speech_tmp.ndim == 1:
+                    speech_tmp = speech_tmp.unsqueeze(0)
+                elif speech_tmp.ndim == 2:
+                    num_channels = speech_tmp.shape[1]
+                    if num_channels > 1:
+                        logger.warning(
+                            "Voice preset '%s': downmixing %d-channel audio at %s to mono",
+                            voice_name,
+                            num_channels,
+                            wav_path,
+                        )
+                    speech_tmp = speech_tmp.mean(dim=1, keepdim=True).T
+                else:
+                    raise InvalidPromptWavError(f"unsupported audio shape {tuple(speech_tmp.shape)} for {wav_path}")
+
+                if not torch.isfinite(speech_tmp).all():
+                    raise InvalidPromptWavError(f"audio file contains NaN or Inf samples: {wav_path}")
+
+                speech_for_vae = self._resample(speech_tmp, sample_rate, vae_sr)
+                speech_chunks.append(speech_for_vae)
+
+                if extractor is not None:
+                    speech_for_spk = self._resample(speech_tmp, sample_rate, 16000)
+                    raw_emb = extractor(speech_for_spk)
+                    se = self.spk_head(raw_emb.to(device=self.device, dtype=self.dtype))
+                    spk_emb_list.append(se)
+            except (FileNotFoundError, InvalidPromptWavError) as e:
+                # if more than a single wav file exist, skip this failing one
+                if allow_partial:
+                    logger.warning(
+                        "Voice preset '%s': skipping invalid prompt wav %s: %s",
+                        voice_name,
+                        wav_path,
+                        e,
+                    )
+                    continue
+                raise
+
+        if not speech_chunks:
+            raise RuntimeError(f"Failed to register voice preset '{voice_name}': no valid prompt wavs remained")
+
+        if extractor is None and self.audio_vae is None:
+            raise RuntimeError(
+                f"Failed to register voice preset '{voice_name}': neither speaker embeddings "
+                "nor AudioVAE prompt features are available"
+            )
 
         speech = torch.cat(speech_chunks, dim=-1)
 
@@ -359,7 +427,9 @@ class MingFlashOmniTalkerForConditionalGeneration(nn.Module, CustomProcessMixin)
                 speech.to(dtype=torch.bfloat16, device=self.device),
                 torch.tensor([speech.size(1)], dtype=torch.long, device=self.device),
             )
-            assert prompt_wav_lat.shape[1] % self.patch_size == 0
+            assert prompt_wav_lat.shape[1] % self.patch_size == 0, (
+                f"AudioVAE latent length is incompatible with patch_size for voice preset '{voice_name}'"
+            )
             prompt_wav_lat = prompt_wav_lat.reshape(-1, self.patch_size, prompt_wav_lat.shape[-1])
             prompt_wav_emb = self.aggregator(prompt_wav_lat)
             prompt_wav_lat = prompt_wav_lat.reshape(1, -1, prompt_wav_lat.shape[-1])
@@ -368,12 +438,14 @@ class MingFlashOmniTalkerForConditionalGeneration(nn.Module, CustomProcessMixin)
             prompt_wav_lat = None
             prompt_wav_emb = None
 
+        if voice_name in self.registered_prompts:
+            logger.warning("Voice preset '%s' is being overwritten", voice_name)
         self.registered_prompts[voice_name] = {
             "prompt_wav_lat": prompt_wav_lat,
             "prompt_wav_emb": prompt_wav_emb,
             "spk_emb": spk_emb_list,
         }
-        logger.info("Registered voice preset '%s' from %s", voice_name, prompt_wav_path)
+        logger.info("Registered voice preset '%s' from %s", voice_name, prompt_wav_paths)
 
     def _load_voice_presets(self) -> None:
         """Load voice_name.json and register all voice presets.
@@ -457,12 +529,6 @@ class MingFlashOmniTalkerForConditionalGeneration(nn.Module, CustomProcessMixin)
         inputs_embeds = self.aggregator(gen_lat)
         stop_out = self.stop_head(last_hidden_state[:, -1, :]).softmax(dim=-1)
         return gen_lat, inputs_embeds, stop_out
-
-    @staticmethod
-    def _segment_text(text: str, max_length: int = 50) -> list[str]:
-        from .text_processing import segment_and_normalize
-
-        return segment_and_normalize(text, max_length=max_length)
 
     @staticmethod
     def _trim_trailing_silence(
@@ -925,7 +991,7 @@ class MingFlashOmniTalkerForConditionalGeneration(nn.Module, CustomProcessMixin)
             elif use_zero_spk_emb:
                 processed_spk_emb = [torch.zeros(1, self.hidden_size, device=self.device, dtype=self.dtype)]
 
-            text_segments = self._segment_text(text, max_length=max_text_length) if text else []
+            text_segments = segment_and_normalize(text, max_length=max_text_length) if text else []
             if not text_segments:
                 # vLLM passes 1D input_ids (num_tokens,) while Qwen2Model expects (batch, seq_len, hidden_size)
                 inputs_embeds = self.model.get_input_embeddings()(input_ids.to(self.device)).unsqueeze(0)
@@ -992,8 +1058,6 @@ class MingFlashOmniTalkerForConditionalGeneration(nn.Module, CustomProcessMixin)
         ``pt_weights_iterator`` (torch.load) crashes, so we read them
         directly via safetensors.torch.load_file.
         """
-        from safetensors.torch import load_file
-
         model_path = self._model_path
 
         # Try local path first
@@ -1079,8 +1143,6 @@ class MingFlashOmniTalkerForConditionalGeneration(nn.Module, CustomProcessMixin)
         if not safetensors_files:
             logger.warning("No AudioVAE safetensors files found for source=%s", source)
             return set()
-
-        from safetensors.torch import load_file
 
         vae_state_keys = set(self.audio_vae.state_dict().keys())
         vae_loader = AutoWeightsLoader(self.audio_vae)
