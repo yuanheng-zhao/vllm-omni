@@ -5,22 +5,17 @@ E2E online serving expansion tests for Ming-flash-omni-2.0 thinker+talker pipeli
 """
 
 import os
+
+os.environ["VLLM_WORKER_MULTIPROC_METHOD"] = "spawn"
+
 from pathlib import Path
 
 import pytest
 
-from tests.conftest import (
-    OmniServerParams,
-    dummy_messages_from_mix_data,
-    generate_synthetic_audio,
-    generate_synthetic_image,
-    generate_synthetic_video,
-    modify_stage_config,
-)
-from tests.utils import hardware_test
-
-os.environ["VLLM_WORKER_MULTIPROC_METHOD"] = "spawn"
-os.environ["VLLM_TEST_CLEAN_GPU_MEMORY"] = "0"
+from tests.helpers.mark import hardware_test
+from tests.helpers.media import generate_synthetic_audio, generate_synthetic_image, generate_synthetic_video
+from tests.helpers.runtime import OmniServerParams, dummy_messages_from_mix_data
+from tests.helpers.stage_config import modify_stage_config
 
 models = ["Jonathan1909/Ming-flash-omni-2.0"]
 
@@ -49,12 +44,9 @@ def get_eager_tts_config():
     return path
 
 
-tts_stage_configs = [get_eager_tts_config()]
-
+stage_configs = [get_eager_tts_config()]
 test_params = [
-    OmniServerParams(model=model, stage_config_path=stage_config)
-    for model in models
-    for stage_config in tts_stage_configs
+    OmniServerParams(model=model, stage_config_path=stage_config) for model in models for stage_config in stage_configs
 ]
 
 
