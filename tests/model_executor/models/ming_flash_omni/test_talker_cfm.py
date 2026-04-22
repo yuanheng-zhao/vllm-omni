@@ -6,16 +6,16 @@ from types import SimpleNamespace
 
 import pytest
 
-torch = pytest.importorskip("torch")
-pytest.importorskip("x_transformers")
-
-from vllm_omni.model_executor.models.ming_flash_omni.talker_modules.aggregator import Aggregator  # noqa: E402
-from vllm_omni.model_executor.models.ming_flash_omni.talker_modules.cfm import (  # noqa: E402
+from vllm_omni.model_executor.models.ming_flash_omni.talker_module import (
     CFM,
+    Aggregator,
     CFMGraphExecutor,
     CFMGraphExecutorPool,
+    DiT,
 )
-from vllm_omni.model_executor.models.ming_flash_omni.talker_modules.dit import DiT  # noqa: E402
+
+torch = pytest.importorskip("torch")
+pytest.importorskip("x_transformers")
 
 pytestmark = [
     pytest.mark.core_model,

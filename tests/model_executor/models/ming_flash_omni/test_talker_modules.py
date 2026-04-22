@@ -4,12 +4,10 @@ from __future__ import annotations
 
 import pytest
 
+from vllm_omni.model_executor.models.ming_flash_omni.talker_module import CFM, Aggregator, DiT
+
 torch = pytest.importorskip("torch")
 pytest.importorskip("x_transformers")
-
-from vllm_omni.model_executor.models.ming_flash_omni.talker_modules.aggregator import Aggregator  # noqa: E402
-from vllm_omni.model_executor.models.ming_flash_omni.talker_modules.cfm import CFM  # noqa: E402
-from vllm_omni.model_executor.models.ming_flash_omni.talker_modules.dit import DiT  # noqa: E402
 
 pytestmark = [pytest.mark.core_model, pytest.mark.cpu]
 

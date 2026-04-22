@@ -19,11 +19,11 @@ from vllm.logger import init_logger
 from vllm_omni.model_executor.model_loader.weight_utils import download_weights_from_hf_specific
 
 from .spk_embedding import SpkembExtractor
-from .talker_modules.audio_postprocess import resample
+from .talker_module import resample
 
 if TYPE_CHECKING:
     from .audio_vae import AudioVAE
-    from .talker_modules.aggregator import Aggregator
+    from .talker_module import Aggregator
 
 logger = init_logger(__name__)
 

@@ -31,11 +31,7 @@ from vllm_omni.transformers_utils.configs.ming_flash_omni import MingFlashOmniTa
 
 from .audio_vae import AudioVAE, AudioVAEConfig
 from .prompt_utils import DEFAULT_PROMPT as MING_DEFAULT_PROMPT
-from .talker_modules.aggregator import Aggregator
-from .talker_modules.audio_generator import MingAudioGenerator
-from .talker_modules.cfm import CFM
-from .talker_modules.dit import DiT
-from .talker_modules.prompt_builder import build_tts_input
+from .talker_module import CFM, Aggregator, DiT, MingAudioGenerator, build_tts_input
 from .text_processing import segment_and_normalize
 from .voice_presets import VoicePresetRegistry
 
