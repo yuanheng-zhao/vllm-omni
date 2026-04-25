@@ -192,9 +192,12 @@ class Decoder(nn.Module):
     def __init__(self, decoder_args, output_dim=320, latent_dim=64, patch_size=-1):
         super().__init__()
         config = Qwen2Config.from_dict(config_dict=decoder_args)
-        # Honor an already-set impl, otherwise use HF's own FA2 detector.
-        if not getattr(config, "_attn_implementation_autoset", False):
-            config._attn_implementation = "flash_attention_2" if is_flash_attn_2_available() else "sdpa"
+        if is_flash_attn_2_available():
+            config._attn_implementation_autoset = True
+            config._attn_implementation = "flash_attention_2"
+        else:
+            config._attn_implementation = "sdpa"
+
         logger.info("AudioVAE Decoder: using attn_implementation=%r", config._attn_implementation)
         self.decoder = Qwen2Model(config)
         self.output_dim = output_dim
@@ -270,8 +273,12 @@ class Encoder(nn.Module):
     def __init__(self, encoder_args, input_dim=320, hop_size=320, latent_dim=64, patch_size=-1):
         super().__init__()
         config = Qwen2Config.from_dict(config_dict=encoder_args)
-        if not getattr(config, "_attn_implementation_autoset", False):
-            config._attn_implementation = "flash_attention_2" if is_flash_attn_2_available() else "sdpa"
+        if is_flash_attn_2_available():
+            config._attn_implementation_autoset = True
+            config._attn_implementation = "flash_attention_2"
+        else:
+            config._attn_implementation = "sdpa"
+
         logger.info("AudioVAE Encoder: using attn_implementation=%r", config._attn_implementation)
         self.encoder = Qwen2Model(config)
         self.input_dim = input_dim
