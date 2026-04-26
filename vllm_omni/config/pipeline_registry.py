@@ -85,6 +85,14 @@ _OMNI_PIPELINES: dict[str, tuple[str, str]] = {
         "vllm_omni.model_executor.models.fish_speech.pipeline",
         "FISH_SPEECH_PIPELINE",
     ),
+    "ming_flash_omni": (
+        "vllm_omni.model_executor.models.ming_flash_omni.pipeline",
+        "MING_FLASH_OMNI_PIPELINE",
+    ),
+    "ming_flash_omni_tts": (
+        "vllm_omni.model_executor.models.ming_flash_omni.pipeline",
+        "MING_FLASH_OMNI_TTS_PIPELINE",
+    ),
     "moss_tts_nano": (
         "vllm_omni.model_executor.models.moss_tts_nano.pipeline",
         "MOSS_TTS_NANO_PIPELINE",
