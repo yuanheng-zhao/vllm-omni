@@ -64,7 +64,6 @@ Thinker + talker (text and/or audio output):
 vllm serve Jonathan1909/Ming-flash-omni-2.0 \
     --omni \
     --port 8091 \
-    --stage-configs-path vllm_omni/model_executor/stage_configs/ming_flash_omni.yaml \
     --log-stats
 ```
 
@@ -171,7 +170,7 @@ The bundled `ming_flash_omni_tts.yaml` runs the talker on a single GPU and expos
 ```bash
 vllm serve Jonathan1909/Ming-flash-omni-2.0 \
     --omni \
-    --stage-configs-path vllm_omni/model_executor/stage_configs/ming_flash_omni_tts.yaml \
+    --deploy-config vllm_omni/deploy/ming_flash_omni_tts.yaml \
     --port 8091 \
     --log-stats
 ```
