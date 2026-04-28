@@ -22,6 +22,13 @@ _PROC = "vllm_omni.model_executor.stage_input_processors.ming_flash_omni"
 MING_FLASH_OMNI_PIPELINE = PipelineConfig(
     model_type="ming_flash_omni",
     model_arch="MingFlashOmniForConditionalGeneration",
+    # Upstream HF config applies model_type="bailingmm_moe_v2_lite"
+    # (the thinker sub-config name) rather than "ming_flash_omni".
+    # Declare the architectures here explicitly for routing
+    hf_architectures=(
+        "MingFlashOmniForConditionalGeneration",
+        "BailingMM2NativeForConditionalGeneration",
+    ),
     stages=(
         StagePipelineConfig(
             stage_id=0,

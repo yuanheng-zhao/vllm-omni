@@ -15,7 +15,8 @@ For standalone TTS (talker only), see [`examples/offline_inference/ming_flash_om
 
 Please refer to the [stage configuration documentation](https://docs.vllm.ai/projects/vllm-omni/en/latest/configuration/stage_configs/) to configure memory allocation appropriately for your hardware setup.
 
-When no `--deploy-config` is passed, the model registry auto-loads the full thinker+talker `vllm_omni/deploy/ming_flash_omni.yaml`.
+When no `--deploy-config` is passed, the model registry auto-loads the full thinker+talker `vllm_omni/deploy/ming_flash_omni.yaml` (See [Omni-Speech](#omni-speech-thinker--talker)).
+
 For text-only output without spinning up the talker, pass:
 
 ```bash
@@ -24,19 +25,17 @@ For text-only output without spinning up the talker, pass:
 
 ## Run examples
 
-The end-to-end script defaults to built-in assets; pass `--image-path`,
-`--audio-path`, or `--video-path` to override.
+The end-to-end script defaults to built-in assets; pass `--image-path`, `--audio-path`, or `--video-path` to override.
+
+### Multi-Modality Understanding (Standalone Thinker)
+
+Here we pass thinker-only deploy yaml:
 
 ```bash
-# Text-only
-python examples/offline_inference/ming_flash_omni/end2end.py --query-type text
-
-# Image / audio / video / mixed understanding
-python examples/offline_inference/ming_flash_omni/end2end.py --query-type use_image
-python examples/offline_inference/ming_flash_omni/end2end.py --query-type use_audio
-python examples/offline_inference/ming_flash_omni/end2end.py --query-type use_video --num-frames 16
-python examples/offline_inference/ming_flash_omni/end2end.py --query-type use_mixed_modalities \
-    --image-path /path/to/image.jpg --audio-path /path/to/audio.wav
+python examples/offline_inference/ming_flash_omni/end2end.py --deploy-config vllm_omni/deploy/ming_flash_omni_thinker_only.yaml --query-type text
+python examples/offline_inference/ming_flash_omni/end2end.py --deploy-config vllm_omni/deploy/ming_flash_omni_thinker_only.yaml --query-type use_image
+python examples/offline_inference/ming_flash_omni/end2end.py --deploy-config vllm_omni/deploy/ming_flash_omni_thinker_only.yaml --query-type use_audio
+python examples/offline_inference/ming_flash_omni/end2end.py --deploy-config vllm_omni/deploy/ming_flash_omni_thinker_only.yaml --query-type use_video --num-frames 16
 ```
 
 ### Reasoning (Thinking Mode)
@@ -47,7 +46,10 @@ and expects the reference figure from the upstream repo — see
 `get_reasoning_query` in `end2end.py`.
 
 ```bash
-python examples/offline_inference/ming_flash_omni/end2end.py -q reasoning --image-path ./3_0.png
+python examples/offline_inference/ming_flash_omni/end2end.py \
+    --deploy-config vllm_omni/deploy/ming_flash_omni_thinker_only.yaml \
+    --query-type reasoning \
+    --image-path ./3_0.png
 ```
 
 ### Omni-Speech (Thinker + Talker)
