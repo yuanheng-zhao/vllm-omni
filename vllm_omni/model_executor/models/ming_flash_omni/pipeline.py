@@ -75,3 +75,25 @@ MING_FLASH_OMNI_TTS_PIPELINE = PipelineConfig(
         ),
     ),
 )
+
+
+# Thinker-only variant: multimodal understanding with text output
+MING_FLASH_OMNI_THINKER_ONLY_PIPELINE = PipelineConfig(
+    model_type="ming_flash_omni_thinker_only",
+    model_arch="MingFlashOmniForConditionalGeneration",
+    stages=(
+        StagePipelineConfig(
+            stage_id=0,
+            model_stage="thinker",
+            execution_type=StageExecutionType.LLM_AR,
+            input_sources=(),
+            final_output=True,
+            final_output_type="text",
+            owns_tokenizer=True,
+            requires_multimodal_data=True,
+            hf_config_name="llm_config",
+            engine_output_type="text",
+            sampling_constraints={"detokenize": True},
+        ),
+    ),
+)
