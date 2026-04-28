@@ -1111,6 +1111,47 @@ class TestMingFlashOmniPipeline:
         assert len(stages) == 1
         assert stages[0].yaml_engine_args["model_arch"] == "MingFlashOmniTalkerForConditionalGeneration"
 
+    def test_thinker_only_pipeline_registered(self):
+        import vllm_omni.model_executor.models.ming_flash_omni.pipeline  # noqa: F401
+
+        p = _PIPELINE_REGISTRY.get("ming_flash_omni_thinker_only")
+        assert p is not None
+        assert p.model_arch == "MingFlashOmniForConditionalGeneration"
+        assert len(p.stages) == 1
+        assert p.validate() == []
+
+    def test_thinker_only_stage(self):
+        import vllm_omni.model_executor.models.ming_flash_omni.pipeline  # noqa: F401
+
+        s = _PIPELINE_REGISTRY["ming_flash_omni_thinker_only"].get_stage(0)
+        assert s.model_stage == "thinker"
+        assert s.execution_type == StageExecutionType.LLM_AR
+        assert s.input_sources == ()
+        assert s.owns_tokenizer is True
+        assert s.requires_multimodal_data is True
+        assert s.final_output_type == "text"
+        assert s.engine_output_type == "text"
+        assert s.hf_config_name == "llm_config"
+        assert s.sampling_constraints["detokenize"] is True
+
+    def test_thinker_only_yaml_loads_and_merges(self):
+        """deploy/ming_flash_omni_thinker_only.yaml parses and routes to the thinker-only pipeline."""
+        import vllm_omni.model_executor.models.ming_flash_omni.pipeline  # noqa: F401
+        from vllm_omni.config.stage_config import load_deploy_config, merge_pipeline_deploy
+
+        deploy_path = Path(__file__).parent.parent / "vllm_omni" / "deploy" / "ming_flash_omni_thinker_only.yaml"
+        if not deploy_path.exists():
+            pytest.skip("ming_flash_omni_thinker_only deploy yaml not found")
+
+        deploy = load_deploy_config(deploy_path)
+        assert len(deploy.stages) == 1
+        assert deploy.pipeline == "ming_flash_omni_thinker_only"
+
+        pipeline = _PIPELINE_REGISTRY["ming_flash_omni_thinker_only"]
+        stages = merge_pipeline_deploy(pipeline, deploy)
+        assert len(stages) == 1
+        assert stages[0].yaml_engine_args["model_arch"] == "MingFlashOmniForConditionalGeneration"
+
 
 class TestBaseConfigInheritance:
     """Test deploy YAML base_config inheritance."""

@@ -484,6 +484,48 @@ _CI_OVERLAYS: dict[str, dict[str, Any]] = {
             },
         },
     },
+    "ming_flash_omni": {
+        "base_config": "ming_flash_omni.yaml",
+        "stages": [
+            {
+                "stage_id": 0,
+                "max_num_seqs": 1,
+                "gpu_memory_utilization": 0.74,
+                "max_model_len": 32768,
+                "max_num_batched_tokens": 32768,
+                "mm_processor_cache_gb": 0,
+                "load_format": "dummy",
+                "default_sampling_params": {
+                    "temperature": 0.0,
+                    "max_tokens": 100,
+                },
+            },
+            {
+                "stage_id": 1,
+                "max_num_seqs": 1,
+                "gpu_memory_utilization": 0.18,
+                "load_format": "dummy",
+            },
+        ],
+    },
+    "ming_flash_omni_thinker_only": {
+        "base_config": "ming_flash_omni_thinker_only.yaml",
+        "stages": [
+            {
+                "stage_id": 0,
+                "max_num_seqs": 1,
+                "gpu_memory_utilization": 0.9,
+                "max_model_len": 32768,
+                "max_num_batched_tokens": 32768,
+                "mm_processor_cache_gb": 0,
+                "load_format": "dummy",
+                "default_sampling_params": {
+                    "temperature": 0.4,
+                    "max_tokens": 100,
+                },
+            },
+        ],
+    },
     # Single-stage thinker-only topology for the abort test.
     "qwen2_5_omni_thinker_only": {
         "async_chunk": False,
