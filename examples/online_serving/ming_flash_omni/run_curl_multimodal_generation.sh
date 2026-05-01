@@ -27,7 +27,7 @@ thinker_sampling_params='{
   "detokenize": true,
   "repetition_penalty": 1.05
 }'
-# Above is optional, it has a default setting in stage_configs of the corresponding model.
+# Above is optional; defaults come from the model's deploy yaml under vllm_omni/deploy/.
 
 # Define URLs for assets
 MARY_HAD_LAMB_AUDIO_URL="https://vllm-public-assets.s3.us-west-2.amazonaws.com/multimodal_asset/mary_had_lamb.ogg"

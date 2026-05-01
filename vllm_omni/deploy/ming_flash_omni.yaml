@@ -50,7 +50,7 @@ stages:
       temperature: 0.0
       max_tokens: 1
 
-# TODO: add per-platform stages once each backend is exercised end-to-end.
 # Ming-flash-omni-2.0 has only been verified on CUDA devices,
-# left empty intentionally.
+# left empty intentionally. Add per-platform overrides here
+# when other backends (ROCm/XPU/NPU) are verified end-to-end.
 platforms: {}
