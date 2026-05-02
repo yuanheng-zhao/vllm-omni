@@ -46,13 +46,8 @@ def get_eager_config():
     return modify_stage_config(_CI_DEPLOY, updates={"stages": {0: {"enforce_eager": True}}})
 
 
-# Thinker-only config — used by text-output tests.
-stage_configs = [get_eager_config_thinker()]
-test_params_thinker = [(model, stage_config) for model in models for stage_config in stage_configs]
-
-# Thinker+talker config — used by audio-output tests.
-stage_configs = [get_eager_config()]
-test_params = [(model, stage_config) for model in models for stage_config in stage_configs]
+test_params_thinker = [(m, c) for m in models for c in [get_eager_config_thinker()]]
+test_params = [(m, c) for m in models for c in [get_eager_config()]]
 
 
 @pytest.mark.core_model
