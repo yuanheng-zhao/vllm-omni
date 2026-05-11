@@ -17,7 +17,6 @@ from diffusers.models.embeddings import TimestepEmbedding, Timesteps
 from diffusers.models.modeling_outputs import Transformer2DModelOutput
 from diffusers.models.normalization import AdaLayerNormContinuous
 from vllm.logger import init_logger
-from vllm.model_executor.layers.layernorm import RMSNorm
 from vllm.model_executor.layers.linear import (
     ColumnParallelLinear,
     QKVParallelLinear,
@@ -25,6 +24,9 @@ from vllm.model_executor.layers.linear import (
     RowParallelLinear,
 )
 from vllm.model_executor.model_loader.weight_utils import default_weight_loader
+
+from vllm_omni.diffusion.layers.linear_compat import bias_outside_linear
+from vllm_omni.diffusion.layers.rmsnorm_compat import Bf16CastRMSNorm as RMSNorm
 
 if TYPE_CHECKING:
     from vllm.model_executor.layers.quantization.base_config import (
@@ -37,6 +39,7 @@ from vllm_omni.diffusion.attention.backends.abstract import (
 from vllm_omni.diffusion.attention.layer import Attention
 from vllm_omni.diffusion.cache.base import CachedTransformer
 from vllm_omni.diffusion.data import OmniDiffusionConfig
+from vllm_omni.diffusion.debug_dump import debug_dump, deep_dump_enabled
 from vllm_omni.diffusion.distributed.hsdp_utils import is_transformer_block_module
 from vllm_omni.diffusion.distributed.sp_plan import (
     SequenceParallelInput,
@@ -193,17 +196,21 @@ class QwenTimestepProjEmbeddings(nn.Module):
             self.addition_t_embedding = nn.Embedding(2, embedding_dim)
 
     def forward(self, timestep, hidden_states, addition_t_cond=None):
-        timesteps_proj = self.time_proj(timestep)
-        timesteps_emb = self.timestep_embedder(timesteps_proj.to(dtype=hidden_states.dtype))  # (N, D)
+        timesteps_proj = self.time_proj(timestep).to(dtype=hidden_states.dtype)
+        _te = self.timestep_embedder
+        sample = bias_outside_linear(timesteps_proj, _te.linear_1.weight, _te.linear_1.bias)
+        if _te.act is not None:
+            sample = _te.act(sample)
+        sample = _te.linear_2(sample)
+        if _te.post_act is not None:
+            sample = _te.post_act(sample)
 
-        conditioning = timesteps_emb
+        conditioning = sample
         if self.use_additional_t_cond:
             if addition_t_cond is None:
                 raise ValueError("When additional_t_cond is True, addition_t_cond must be provided.")
-            addition_t_emb = self.addition_t_embedding(addition_t_cond)
-            addition_t_emb = addition_t_emb.to(dtype=hidden_states.dtype)
+            addition_t_emb = self.addition_t_embedding(addition_t_cond).to(dtype=hidden_states.dtype)
             conditioning = conditioning + addition_t_emb
-
         return conditioning
 
 
@@ -796,14 +803,29 @@ class QwenImageTransformerBlock(nn.Module):
         joint_attention_kwargs: dict[str, Any] | None = None,
         modulate_index: list[int] | None = None,
         hidden_states_mask: torch.Tensor | None = None,
+        block_index: int | None = None,
     ) -> tuple[torch.Tensor, torch.Tensor]:
-        # Get modulation parameters for both streams
-        img_mod_params = self.img_mod(temb)  # [B, 6*dim]
+        _block_deep = block_index == 0 and deep_dump_enabled()
+        if _block_deep:
+            debug_dump(
+                "B_block000_in", hidden_states=hidden_states, encoder_hidden_states=encoder_hidden_states, temb=temb
+            )
+
+        # vllm-omni#3256: route img_mod / txt_mod (M=1, K=3072, N=18432)
+        # through bias_outside_linear, which is torch.compiler.disable-wrapped
+        # so Inductor cannot pattern-match `mm + add -> addmm` and dispatch
+        # to the bias-fused cuBLAS epilogue.
+        _img_lin = self.img_mod[1]
+        img_mod_params = bias_outside_linear(F.silu(temb), _img_lin.weight, _img_lin.bias)  # [B, 6*dim]
 
         if self.zero_cond_t:
             temb = torch.chunk(temb, 2, dim=0)[0]
 
-        txt_mod_params = self.txt_mod(temb)  # [B, 6*dim]
+        _txt_lin = self.txt_mod[1]
+        txt_mod_params = bias_outside_linear(F.silu(temb), _txt_lin.weight, _txt_lin.bias)  # [B, 6*dim]
+
+        if _block_deep:
+            debug_dump("B_block000_mod_params", img_mod_params=img_mod_params, txt_mod_params=txt_mod_params)
 
         # Split modulation parameters for norm1 and norm2
         img_mod1, img_mod2 = img_mod_params.chunk(2, dim=-1)  # Each [B, 3*dim]
@@ -811,6 +833,8 @@ class QwenImageTransformerBlock(nn.Module):
 
         # Process image stream - norm1 + modulation
         img_scale1, img_shift1, img_gate1 = self._modulate(img_mod1, modulate_index)
+        if _block_deep:
+            debug_dump("B_block000_img_modulation1", img_scale1=img_scale1, img_shift1=img_shift1, img_gate1=img_gate1)
         img_modulated = self.img_norm1(hidden_states, img_scale1, img_shift1)
 
         # Process text stream - norm1 + modulation
@@ -858,6 +882,9 @@ class QwenImageTransformerBlock(nn.Module):
             encoder_hidden_states = encoder_hidden_states.clip(-65504, 65504)
         if hidden_states.dtype == torch.float16:
             hidden_states = hidden_states.clip(-65504, 65504)
+
+        if _block_deep:
+            debug_dump("B_block000_out", hidden_states=hidden_states, encoder_hidden_states=encoder_hidden_states)
 
         return encoder_hidden_states, hidden_states
 
@@ -1097,8 +1124,14 @@ class QwenImageTransformer2DModel(CachedTransformer):
         # This ensures modulate_index sequence dimension matches sharded hidden_states
         timestep, modulate_index = self.modulate_index_prepare(timestep, img_shapes)
 
+        # vllm-omni#3256: minimal validation dumps. debug_dump is no-op unless
+        _deep = deep_dump_enabled()
         encoder_hidden_states = self.txt_norm(encoder_hidden_states)
+        if _deep:
+            debug_dump("S4_after_txt_norm_only", encoder_hidden_states=encoder_hidden_states)
         encoder_hidden_states = self.txt_in(encoder_hidden_states)
+        if _deep:
+            debug_dump("S4_after_txt_norm_in", encoder_hidden_states=encoder_hidden_states)
 
         if guidance is not None:
             guidance = guidance.to(hidden_states.dtype) * 1000
@@ -1108,6 +1141,8 @@ class QwenImageTransformer2DModel(CachedTransformer):
             if guidance is None
             else self.time_text_embed(timestep, guidance, hidden_states, additional_t_cond)
         )
+        if _deep:
+            debug_dump("S4_temb", temb=temb)
 
         # Check for SP auto_pad: create attention mask dynamically if padding was applied
         # In Ulysses mode, attention is computed on the FULL sequence (after All-to-All)
@@ -1143,13 +1178,19 @@ class QwenImageTransformer2DModel(CachedTransformer):
                 joint_attention_kwargs=attention_kwargs,
                 modulate_index=modulate_index,
                 hidden_states_mask=hidden_states_mask,
+                block_index=index_block,
             )
 
         if self.zero_cond_t:
             temb = temb.chunk(2, dim=0)[0]
-        # Use only the image part (hidden_states) from the dual-stream blocks
-        hidden_states = self.norm_out(hidden_states, temb)
+
+        _no = self.norm_out
+        _emb = bias_outside_linear(F.silu(temb).to(hidden_states.dtype), _no.linear.weight, _no.linear.bias)
+        _scale, _shift = torch.chunk(_emb, 2, dim=1)
+        hidden_states = _no.norm(hidden_states) * (1 + _scale)[:, None, :] + _shift[:, None, :]
         output = self.proj_out(hidden_states)
+        if _deep:
+            debug_dump("S6_proj_out", output=output)
 
         # Note: SP gather is handled automatically by _sp_plan's SequenceParallelGatherHook
         # on proj_out output. No manual all_gather needed here.

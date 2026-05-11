@@ -622,6 +622,11 @@ class QwenImagePipeline(nn.Module, QwenImageCFGParallelMixin, DiffusionPipelineP
         Validates inputs, encodes prompts, prepares latents, computes timesteps,
         and returns all intermediate values as a dict.
         """
+        # vllm-omni#3256: new dump partition per request
+        from vllm_omni.diffusion.debug_dump import mark_request_start
+
+        mark_request_start(label=f"hw{height}x{width}_steps{num_inference_steps}")
+
         self.check_inputs(
             prompt,
             height,
