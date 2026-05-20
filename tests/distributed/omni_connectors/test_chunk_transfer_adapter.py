@@ -520,7 +520,6 @@ def test_generation_scheduler_calls_cleanup_on_finished(monkeypatch, mocker: Moc
 
     scheduler._handle_stopped_request = mocker.MagicMock(return_value=True)
     scheduler._free_request = mocker.MagicMock(return_value=None)
-    scheduler._get_routed_experts = mocker.MagicMock(return_value=None)
     scheduler.running = [request]
     scheduler.waiting = mocker.MagicMock()
     scheduler.waiting.remove_requests = mocker.MagicMock()
@@ -540,7 +539,6 @@ def test_generation_scheduler_calls_cleanup_on_finished(monkeypatch, mocker: Moc
         kv_connector_output=None,
         cudagraph_stats=None,
         req_id_to_index={"req-s1": 0},
-        routed_experts_dict=None,
     )
 
     OmniGenerationScheduler.update_from_output(scheduler, scheduler_output, model_runner_output)
@@ -604,7 +602,6 @@ def test_ar_scheduler_defers_cleanup_and_queues_save_on_finished(mocker: MockerF
     scheduler._process_kv_transfer_trigger = mocker.MagicMock(return_value=False)
     scheduler._handle_stopped_request = mocker.MagicMock(return_value=True)
     scheduler._free_request = mocker.MagicMock(return_value=None)
-    scheduler._get_routed_experts = mocker.MagicMock(return_value=None)
     scheduler.running = [request]
     scheduler.waiting = mocker.MagicMock()
     scheduler.waiting.remove_requests = mocker.MagicMock()
@@ -626,7 +623,6 @@ def test_ar_scheduler_defers_cleanup_and_queues_save_on_finished(mocker: MockerF
         cudagraph_stats=None,
         req_id_to_index={"req-ar": 0},
         kv_extracted_req_ids=None,
-        routed_experts_dict=None,
     )
 
     OmniARScheduler.update_from_output(scheduler, scheduler_output, model_runner_output)
@@ -730,7 +726,6 @@ def _build_deferred_finish_scheduler(mocker, *, running, pending_finish_reqs):
 
     scheduler._handle_stopped_request = mocker.MagicMock(return_value=True)
     scheduler._free_request = mocker.MagicMock(return_value=None)
-    scheduler._get_routed_experts = mocker.MagicMock(return_value=None)
     scheduler.running = list(running)
     scheduler.waiting = mocker.MagicMock()
     scheduler.waiting.remove_requests = mocker.MagicMock()
