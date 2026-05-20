@@ -397,7 +397,6 @@ class OmniARScheduler(OmniSchedulerMixin, VLLMScheduler):
             kv_transfer_params = None
             status_before_stop = request.status
             finish_reason = None
-            routed_experts = None
 
             # Check for stop and update request status.
             if new_token_ids:
@@ -428,12 +427,6 @@ class OmniARScheduler(OmniSchedulerMixin, VLLMScheduler):
                     stopped = True
 
             if stopped:
-                if (
-                    model_runner_output.routed_experts_dict is not None
-                    and req_id in model_runner_output.routed_experts_dict
-                ):
-                    routed_experts = model_runner_output.routed_experts_dict[req_id]
-
                 # Capture finish_reason BEFORE _handle_stopped_request, which may
                 # reset the status to WAITING for streaming requests that continue.
                 finish_reason = request.get_finished_reason()
@@ -475,7 +468,6 @@ class OmniARScheduler(OmniSchedulerMixin, VLLMScheduler):
                         prefill_stats=request.take_prefill_stats(),
                         kv_transfer_params=kv_transfer_params,
                         trace_headers=request.trace_headers,
-                        routed_experts=routed_experts,
                         num_nans_in_logits=request.num_nans_in_logits,
                         is_segment_finished=is_segment_finished,
                         new_prompt_len_snapshot=self._new_prompt_len_snapshot.get(req_id, None),
