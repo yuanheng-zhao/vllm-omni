@@ -70,6 +70,7 @@ the thinker:
 vllm serve Jonathan1909/Ming-flash-omni-2.0 --omni \
     --deploy-config vllm_omni/deploy/ming_flash_omni_image.yaml \
     --stage-init-timeout 1800 \
+    --init-timeout 1800 \
     --port 8091
 ```
 
