@@ -70,13 +70,13 @@ the thinker:
 vllm serve Jonathan1909/Ming-flash-omni-2.0 --omni \
     --deploy-config vllm_omni/deploy/ming_flash_omni_image.yaml \
     --stage-init-timeout 1800 \
-    --port 8188
+    --port 8091
 ```
 
 Then request image output by passing `"modalities": ["image"]`:
 
 ```bash
-curl http://127.0.0.1:8188/v1/chat/completions \
+curl http://127.0.0.1:8091/v1/chat/completions \
     -H "Content-Type: application/json" \
     -d '{
       "model": "Jonathan1909/Ming-flash-omni-2.0",
@@ -109,7 +109,7 @@ Pass image-gen overrides via the diffusion-stage `sampling_params_list[1].extra_
 Example with all the knobs:
 
 ```bash
-curl http://127.0.0.1:8188/v1/chat/completions \
+curl http://127.0.0.1:8091/v1/chat/completions \
     -H "Content-Type: application/json" \
     -d '{
       "model": "Jonathan1909/Ming-flash-omni-2.0",
