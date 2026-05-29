@@ -77,21 +77,13 @@ vllm serve Jonathan1909/Ming-flash-omni-2.0 --omni \
 Then request image output by passing `"modalities": ["image"]`:
 
 ```bash
-curl http://127.0.0.1:8091/v1/chat/completions \
+curl -s http://127.0.0.1:8091/v1/chat/completions \
     -H "Content-Type: application/json" \
     -d '{
       "model": "Jonathan1909/Ming-flash-omni-2.0",
-      "messages": [{"role": "user", "content": "Draw a beautiful girl with short black hair and red dress."}],
+      "messages": [{"role": "user", "content": "Please draw a cute cat."}],
       "modalities": ["image"]
-    }' -o /tmp/ming_response.json
-
-python - <<'PY'
-import base64, json
-r = json.load(open('/tmp/ming_response.json'))
-url = r['choices'][0]['message']['content'][0]['image_url']['url']
-open('/tmp/ming_gen.png', 'wb').write(base64.b64decode(url.split(',', 1)[1]))
-print('saved /tmp/ming_gen.png')
-PY
+    }' | jq -r '.choices[0].message.content[0].image_url.url | split(",")[1]' | base64 -d > ming_imagegen.png
 ```
 
 ### Optional knobs
@@ -123,7 +115,7 @@ curl http://127.0.0.1:8091/v1/chat/completions \
             "byte5_text":["理解与生成统一"]}}}
       ],
       "messages": [{"role": "user", "content": "Draw a poster."}]
-    }' -o /tmp/ming_response.json
+    }' | jq -r '.choices[0].message.content[0].image_url.url | split(",")[1]' | base64 -d > ming_imagegen_knobs.png
 ```
 
 ### img2img (reference image)
