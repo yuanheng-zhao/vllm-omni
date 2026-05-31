@@ -27,6 +27,7 @@ logger = logging.get_logger(__name__)
 
 class BailingMoeV2Config(PretrainedConfig):
     model_type = "bailing_moe_v2"
+    ignore_keys_at_rope_validation = {"mrope_section"}
 
     def __init__(
         self,
@@ -237,6 +238,7 @@ class WhisperEncoderConfig(PretrainedConfig):
 
 class BailingMM2Config(PretrainedConfig):
     model_type = "bailingmm_moe_v2_lite"
+    ignore_keys_at_rope_validation = {"mrope_section"}
     is_composition = True
     sub_configs: ClassVar = {"llm_config": AutoConfig}
 

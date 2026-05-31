@@ -540,20 +540,24 @@ class MingFlashOmniThinkerMultiModalProcessor(BaseMultiModalProcessor[MingFlashO
         if images is not None:
             image_outputs = hf_processor.image_processor(
                 images=images,
-                videos=None,
                 return_tensors="pt",
             )
             data.update(image_outputs)
 
         videos = mm_data.get("videos", None)
         if videos is not None:
-            # TODO: ``videos=`` on image_processor is deprecated since
-            # transformers v4.57 (removed in v5); migrate to Qwen2VLVideoProcessor.
-            video_outputs = hf_processor.image_processor(
-                images=None,
-                videos=videos,
-                return_tensors="pt",
-            )
+            video_processor = getattr(hf_processor, "video_processor", None)
+            if video_processor is not None:
+                video_outputs = video_processor(
+                    videos=videos,
+                    return_tensors="pt",
+                )
+            else:
+                video_outputs = hf_processor.image_processor(
+                    images=None,
+                    videos=videos,
+                    return_tensors="pt",
+                )
             # Rename keys to distinguish from images
             if "pixel_values" in video_outputs:
                 video_outputs["pixel_values_videos"] = video_outputs.pop("pixel_values")

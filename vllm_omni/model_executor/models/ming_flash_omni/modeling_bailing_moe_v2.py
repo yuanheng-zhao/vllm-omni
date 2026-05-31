@@ -824,7 +824,7 @@ class BailingMoeV2ForCausalLM(nn.Module, CustomProcessMixin):
         hidden_states: torch.Tensor,
         sampling_metadata,
     ) -> torch.Tensor | None:
-        logits = self.logits_processor(self.lm_head, hidden_states, sampling_metadata)
+        logits = self.logits_processor(self.lm_head, hidden_states)
         return logits
 
     def sample(
