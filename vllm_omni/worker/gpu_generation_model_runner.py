@@ -64,7 +64,14 @@ class GPUGenerationModelRunner(OmniGPUModelRunner, OmniConnectorModelRunnerMixin
             "CosyVoice3Model",
             "DyninOmniForConditionalGeneration",
         }
-        if getattr(self.model_config, "model_arch", None) in _OMNI_CONNECTOR_INIT_ARCHS:
+        # Mirrors _ASYNC_CHUNK_ONLY_CONNECTOR_ARCHS in gpu_ar_model_runner.py.
+        _ASYNC_CHUNK_ONLY_CONNECTOR_ARCHS = {
+            "MingFlashOmniTalkerForConditionalGeneration",
+        }
+        model_arch = getattr(self.model_config, "model_arch", None)
+        if model_arch in _OMNI_CONNECTOR_INIT_ARCHS or (
+            model_arch in _ASYNC_CHUNK_ONLY_CONNECTOR_ARCHS and getattr(self.model_config, "async_chunk", False)
+        ):
             self.init_omni_connectors(
                 vllm_config=self.vllm_config,
                 model_config=self.model_config,
