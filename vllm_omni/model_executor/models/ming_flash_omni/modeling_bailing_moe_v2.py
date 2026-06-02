@@ -714,6 +714,9 @@ class BailingMoeV2Model(nn.Module):
     def get_input_embeddings(self):
         return self.word_embeddings
 
+    def embed_input_ids(self, input_ids: torch.Tensor) -> torch.Tensor:
+        return self.word_embeddings(input_ids)
+
     def forward(
         self,
         input_ids: torch.Tensor,
@@ -793,6 +796,9 @@ class BailingMoeV2ForCausalLM(nn.Module, CustomProcessMixin):
         self.logits_processor = LogitsProcessor(config.vocab_size)
         self.sampler = Sampler()
         self.make_empty_intermediate_tensors = self.model.make_empty_intermediate_tensors
+
+    def embed_input_ids(self, input_ids: torch.Tensor) -> torch.Tensor:
+        return self.model.embed_input_ids(input_ids)
 
     def forward(
         self,
