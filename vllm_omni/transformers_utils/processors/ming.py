@@ -162,8 +162,6 @@ class MingFlashOmniProcessor(ProcessorMixin):
     """
 
     attributes = ["image_processor", "audio_processor", "tokenizer"]
-    if _HAS_VIDEO_PROCESSOR:
-        attributes = ["image_processor", "video_processor", "audio_processor", "tokenizer"]
     image_processor_class = "AutoImageProcessor"
     if _HAS_VIDEO_PROCESSOR:
         video_processor_class = "AutoVideoProcessor"
@@ -192,14 +190,15 @@ class MingFlashOmniProcessor(ProcessorMixin):
         self.image_token = PLACEHOLDER_IMAGE_TOKEN_IN_TEXT
         self.video_token = PLACEHOLDER_VIDEO_TOKEN_IN_TEXT
         self.audio_token = PLACEHOLDER_AUDIO_TOKEN_IN_TEXT
-        processor_kwargs = dict(
+        if video_processor is not None and not _HAS_VIDEO_PROCESSOR:
+            raise ValueError("`video_processor` requires transformers with `AutoVideoProcessor` support.")
+
+        super().__init__(
             image_processor=image_processor,
             audio_processor=audio_processor,
             tokenizer=tokenizer,
         )
-        if _HAS_VIDEO_PROCESSOR:
-            processor_kwargs["video_processor"] = video_processor
-        super().__init__(**processor_kwargs)
+        self.video_processor = video_processor
 
         # Fall back to the tokenizer's own chat_template.
         if self.chat_template is None:
