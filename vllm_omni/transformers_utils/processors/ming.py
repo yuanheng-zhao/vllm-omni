@@ -171,12 +171,12 @@ class MingFlashOmniProcessor(ProcessorMixin):
     def __init__(
         self,
         image_processor=None,
-        video_processor=None,
         audio_processor=None,
         tokenizer=None,
         merge_size: int = 2,
         **kwargs,
     ):
+        video_processor = kwargs.pop("video_processor", None)
         # Enforce that all sub-processors exist
         # Keep None defaults in the signature for HF ProcessorMixin compatibility
         if image_processor is None:
@@ -203,6 +203,23 @@ class MingFlashOmniProcessor(ProcessorMixin):
         # Fall back to the tokenizer's own chat_template.
         if self.chat_template is None:
             self.chat_template = getattr(tokenizer, "chat_template", None)
+
+    @classmethod
+    def from_pretrained(cls, pretrained_model_name_or_path, *args, **kwargs):
+        video_processor = kwargs.pop("video_processor", None)
+        processor = super().from_pretrained(pretrained_model_name_or_path, *args, **kwargs)
+        if video_processor is not None:
+            processor.video_processor = video_processor
+        elif _HAS_VIDEO_PROCESSOR:
+            try:
+                processor.video_processor = AutoVideoProcessor.from_pretrained(
+                    pretrained_model_name_or_path,
+                    *args,
+                    **kwargs,
+                )
+            except OSError:
+                processor.video_processor = None
+        return processor
 
     def __call__(
         self,
@@ -241,12 +258,15 @@ class MingFlashOmniProcessor(ProcessorMixin):
                     **kwargs.get("videos_kwargs", {}),
                 )
             else:
-                video_outputs = self.image_processor(
-                    images=None,
-                    videos=videos,
-                    return_tensors="pt",
-                    **kwargs.get("videos_kwargs", {}),
-                )
+                try:
+                    video_outputs = self.image_processor(
+                        images=None,
+                        videos=videos,
+                        return_tensors="pt",
+                        **kwargs.get("videos_kwargs", {}),
+                    )
+                except TypeError as exc:
+                    raise ValueError("Video inputs require `video_processor` with this Transformers version.") from exc
             if "pixel_values" in video_outputs:
                 video_outputs["pixel_values_videos"] = video_outputs.pop("pixel_values")
             if "image_grid_thw" in video_outputs:

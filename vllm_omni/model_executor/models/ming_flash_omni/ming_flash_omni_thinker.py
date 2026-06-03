@@ -553,11 +553,14 @@ class MingFlashOmniThinkerMultiModalProcessor(BaseMultiModalProcessor[MingFlashO
                     return_tensors="pt",
                 )
             else:
-                video_outputs = hf_processor.image_processor(
-                    images=None,
-                    videos=videos,
-                    return_tensors="pt",
-                )
+                try:
+                    video_outputs = hf_processor.image_processor(
+                        images=None,
+                        videos=videos,
+                        return_tensors="pt",
+                    )
+                except TypeError as exc:
+                    raise ValueError("Video inputs require `video_processor` with this Transformers version.") from exc
             # Rename keys to distinguish from images
             if "pixel_values" in video_outputs:
                 video_outputs["pixel_values_videos"] = video_outputs.pop("pixel_values")
