@@ -902,6 +902,7 @@ class MingAudioGenerator:
         if self._audio_vae is None:
             return requested_max_steps
 
+        # Transformers >=5.x may expose these config values as 0-d tensors.
         sample_rate = float(self._audio_vae.config.sample_rate)
         vae_patch_size = float(getattr(self._audio_vae.config, "patch_size", 4))
         hop_size = float(getattr(self._audio_vae.decoder, "hop_length", 320))

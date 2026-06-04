@@ -22,6 +22,7 @@ from transformers import AutoFeatureExtractor, AutoProcessor
 from transformers.feature_extraction_utils import BatchFeature, FeatureExtractionMixin
 from transformers.processing_utils import ProcessorMixin
 from transformers.tokenization_utils_base import PreTokenizedInput, TextInput
+from transformers.utils import logging
 
 try:
     from transformers import AutoVideoProcessor
@@ -29,6 +30,13 @@ except ImportError:
     AutoVideoProcessor = None
 
 _HAS_VIDEO_PROCESSOR = AutoVideoProcessor is not None
+
+logger = logging.get_logger(__name__)
+
+
+def raise_missing_video_processor():
+    raise ValueError("Ming Flash Omni video inputs require a Transformers 5.x `video_processor`.")
+
 
 DEFAULT_IMAGE_PATCH_TOKEN = "<imagePatch>"
 DEFAULT_IM_START_TOKEN = "<image>"
@@ -219,7 +227,17 @@ class MingFlashOmniProcessor(ProcessorMixin):
                 )
             except OSError:
                 processor.video_processor = None
+            except (ValueError, KeyError) as exc:
+                logger.warning("Failed to load optional Ming video processor: %s", exc)
+                processor.video_processor = None
         return processor
+
+    def save_pretrained(self, save_directory, push_to_hub: bool = False, **kwargs):
+        output = super().save_pretrained(save_directory, push_to_hub=push_to_hub, **kwargs)
+        video_processor = getattr(self, "video_processor", None)
+        if video_processor is not None:
+            video_processor.save_pretrained(save_directory)
+        return output
 
     def __call__(
         self,
@@ -258,15 +276,7 @@ class MingFlashOmniProcessor(ProcessorMixin):
                     **kwargs.get("videos_kwargs", {}),
                 )
             else:
-                try:
-                    video_outputs = self.image_processor(
-                        images=None,
-                        videos=videos,
-                        return_tensors="pt",
-                        **kwargs.get("videos_kwargs", {}),
-                    )
-                except TypeError as exc:
-                    raise ValueError("Video inputs require `video_processor` with this Transformers version.") from exc
+                raise_missing_video_processor()
             if "pixel_values" in video_outputs:
                 video_outputs["pixel_values_videos"] = video_outputs.pop("pixel_values")
             if "image_grid_thw" in video_outputs:

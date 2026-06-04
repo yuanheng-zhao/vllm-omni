@@ -72,6 +72,7 @@ from vllm_omni.transformers_utils.processors.ming import (
     PLACEHOLDER_VIDEO_TOKEN_IN_TEXT,
     MingFlashOmniProcessor,
     MingWhisperFeatureExtractor,
+    raise_missing_video_processor,
 )
 
 from .audio_encoder import WhisperAudioEncoder
@@ -553,14 +554,7 @@ class MingFlashOmniThinkerMultiModalProcessor(BaseMultiModalProcessor[MingFlashO
                     return_tensors="pt",
                 )
             else:
-                try:
-                    video_outputs = hf_processor.image_processor(
-                        images=None,
-                        videos=videos,
-                        return_tensors="pt",
-                    )
-                except TypeError as exc:
-                    raise ValueError("Video inputs require `video_processor` with this Transformers version.") from exc
+                raise_missing_video_processor()
             # Rename keys to distinguish from images
             if "pixel_values" in video_outputs:
                 video_outputs["pixel_values_videos"] = video_outputs.pop("pixel_values")

@@ -354,7 +354,7 @@ class MingFlashOmniTalkerConfig(PretrainedConfig):
         self.campplus_model = campplus_model
 
     def get_text_config(self, decoder: bool = False) -> PretrainedConfig:  # noqa: ARG002
-        llm_config = getattr(self, "llm_config", None)
+        llm_config = self.llm_config
         if isinstance(llm_config, dict):
             return PretrainedConfig.from_dict(llm_config)
 
