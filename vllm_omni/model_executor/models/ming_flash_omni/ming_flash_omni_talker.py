@@ -326,9 +326,18 @@ class MingFlashOmniTalkerForConditionalGeneration(nn.Module, CustomProcessMixin)
     def _extract_additional_info(
         runtime_additional_information: list[dict] | None,
     ) -> dict[str, Any]:
-        if runtime_additional_information and len(runtime_additional_information) > 0:
-            return runtime_additional_information[0] or {}
-        return {}
+        if not runtime_additional_information or len(runtime_additional_information) == 0:
+            return {}
+        info = runtime_additional_information[0] or {}
+
+        if isinstance(info, dict):
+            kv_metadata = info.get("kv_metadata")
+            if isinstance(kv_metadata, dict):
+                nested = kv_metadata.get("additional_information")
+                if isinstance(nested, dict) and nested:
+                    return nested
+
+        return info
 
     def _resolve_generation_params(self, additional_info: dict[str, Any]) -> _GenerationParams:
         # "omni"    : thinker -> talker hand-off with hardcoded defaults
