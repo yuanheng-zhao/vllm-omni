@@ -593,10 +593,17 @@ def thinker2talker_async_chunk(
     def _terminal_marker() -> OmniPayloadStruct:
         return OmniPayloadStruct(meta=MetaStruct(finished=torch.tensor(True, dtype=torch.bool)))
 
+    def _drop_request_state() -> None:
+        # Reclaim per-request producer state once the request is finished.
+        text_buf.pop(request_id, None)
+        flushed_counts.pop(request_id, None)
+
     if not full_text:
-        # Nothing produced yet. On finish, emit a terminal marker so the
-        # consumer closes its stream; otherwise back-pressure.
-        return _terminal_marker() if finished else None
+        # On finish, emit a terminal marker so the consumer closes its stream
+        if finished:
+            _drop_request_state()
+            return _terminal_marker()
+        return None
 
     sentences = split_text_into_sentences(full_text)
     already_flushed = flushed_counts.get(request_id, 0)
@@ -605,17 +612,25 @@ def thinker2talker_async_chunk(
     new_sentences = [s for s in ready[already_flushed:] if s and s.strip()]
 
     if not new_sentences:
-        return _terminal_marker() if finished else None
+        if finished:
+            _drop_request_state()
+            return _terminal_marker()
+        return None
 
     flushed_counts[request_id] = len(ready)
     new_text = " ".join(new_sentences)
     additional_info = _request_additional_info_dict(request)
     talker_info = _build_talker_info(new_text, additional_info)
 
-    return OmniPayloadStruct(
+    payload = OmniPayloadStruct(
         kv_metadata={"text": new_text, "additional_information": talker_info},
         meta=MetaStruct(finished=torch.tensor(bool(finished), dtype=torch.bool)),
     )
+    if finished:
+        # terminal flush carried real data; reclaim state after building it.
+        _drop_request_state()
+
+    return payload
 
 
 __all__ = [
