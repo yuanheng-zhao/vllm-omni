@@ -32,7 +32,7 @@ from vllm_omni.transformers_utils.configs.ming_flash_omni import MingFlashOmniTa
 from .audio_vae import AudioVAE, AudioVAEConfig
 from .prompt_utils import DEFAULT_PROMPT as MING_DEFAULT_PROMPT
 from .talker_module import CFM, Aggregator, DiT, MingAudioGenerator, build_tts_input
-from .text_processing import segment_and_normalize
+from .text_processing import cut_text_by_semantic_length, segment_and_normalize
 from .voice_presets import VoicePresetRegistry
 
 logger = init_logger(__name__)
@@ -313,10 +313,21 @@ class MingFlashOmniTalkerForConditionalGeneration(nn.Module, CustomProcessMixin)
         params = self._resolve_generation_params(additional_info)
         voice = self._resolve_voice(additional_info)
 
+        # Async-chunk (streaming) path: This stage owns detokenization and segmentation,
+        # and synthesizes only the segments that have *settled* since the previous chunk.
+        # When no new segment has settled yet we emit an empty audio chunk (no-op)
+        streamed_text = self._resolve_streamed_settled_text(runtime_additional_information, params)
+        if streamed_text is not None:
+            if not streamed_text:
+                return self._decode_to_output([], stream_decode=params.stream_decode)
+            text = streamed_text
+        else:
+            text = additional_info.get("text", "")
+
         latents = self._generate_latents(
             input_ids=input_ids,
             inputs_embeds=inputs_embeds,
-            text=additional_info.get("text", ""),
+            text=text,
             params=params,
             voice=voice,
         )
@@ -338,6 +349,58 @@ class MingFlashOmniTalkerForConditionalGeneration(nn.Module, CustomProcessMixin)
                     return nested
 
         return info
+
+    @staticmethod
+    def _payload_finished(info: dict) -> bool:
+        meta = info.get("meta") if isinstance(info, dict) else None
+        flag = meta.get("finished") if isinstance(meta, dict) else None
+        if isinstance(flag, torch.Tensor):
+            return flag.numel() == 1 and bool(flag.item())
+        return bool(flag) if flag is not None else False
+
+    def _resolve_streamed_settled_text(
+        self,
+        runtime_additional_information: list[dict] | None,
+        params: _GenerationParams,
+    ) -> str | None:
+        """Detokenize streamed thinker token ids to text that newly settled.
+
+        Returns None when this is not the streaming-ids path (so the caller
+        falls back to `additional_info['text']` for sync / standalone TTS).
+        Returns empty string "" when ids are present but no new segment has settled yet.
+        """
+        if not runtime_additional_information:
+            return None
+        info = runtime_additional_information[0]
+        if not isinstance(info, dict):
+            return None
+        ids = info.get("ids")
+        output_ids = ids.get("output") if isinstance(ids, dict) else None
+        if not output_ids:
+            return None
+
+        state = getattr(self, "_streamed_settled", None)
+        if state is None:
+            state = {}
+            self._streamed_settled = state
+
+        req_id = info.get("request_id") or "default"
+        finished = self._payload_finished(info)
+        cumulative_text = self.tokenizer.decode(output_ids, skip_special_tokens=True)
+        # NOTE: Boundary parity: Cut segments in a greedy left-to-right way,
+        # so running it on the cumulative text and emitting all-but-the-last
+        # segment yields the same fragments the sync path produces on the full text;
+        # and only the final (in-progress) segment is held until finish.
+        segments = cut_text_by_semantic_length(cumulative_text, params.max_text_length)
+        ready = segments if finished else segments[:-1]
+        already = int(state.get(req_id, 0))
+        new_segments = [s for s in ready[already:] if s and s.strip()]
+        if finished:
+            state.pop(req_id, None)
+        else:
+            state[req_id] = len(ready)
+
+        return " ".join(new_segments)
 
     def _resolve_generation_params(self, additional_info: dict[str, Any]) -> _GenerationParams:
         # "omni"    : thinker -> talker hand-off with hardcoded defaults

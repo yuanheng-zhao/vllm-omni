@@ -12,9 +12,9 @@ from typing import Any
 import torch
 from vllm.inputs import TextPrompt
 
-from vllm_omni.data_entry_keys import MetaStruct, OmniPayloadStruct
+from vllm_omni.data_entry_keys import IdsStruct, MetaStruct, OmniPayloadStruct
+from vllm_omni.engine import OmniEngineCoreRequest
 from vllm_omni.inputs.data import OmniTokensPrompt
-from vllm_omni.model_executor.models.ming_flash_omni.text_processing import split_text_into_sentences
 
 logger = logging.getLogger(__name__)
 
@@ -608,29 +608,24 @@ def _request_additional_info_dict(request: Any) -> dict[str, Any]:
     return {}
 
 
-def _extract_incremental_thinker_text(pooling_output: Any, request: Any) -> str:
-    """Return the *cumulative* detokenized text produced by the thinker so far.
+def _committed_output_ids(transfer_manager: Any, request: OmniEngineCoreRequest) -> list[int]:
+    """Return the thinker's *committed* output token ids produced so far."""
+    # TODO: revise
+    all_token_ids = getattr(request, "all_token_ids", None) or getattr(request, "_all_token_ids", None)
+    if not all_token_ids:
+        return []
 
-    NOTE: this assumes the thinker stage emits incremental detokenized text
-    on the producer worker each step.
-    The thinker pipeline sets `sampling_constraints={"detokenize": True}`;
-    if text is only materialized at request finish, streaming still produces
-    the full output at the final step (correctness preserved) but TTFA will not
-    improve until per-step detokenization is enabled on stage 0.
-    """
-    # 1. Try source pooling_output["text"] / ["detokenized_text"] (per-step emit)
-    if isinstance(pooling_output, dict):
-        for key in ("text", "detokenized_text", "output_text"):
-            val = pooling_output.get(key)
-            if isinstance(val, str) and val:
-                return val
+    num_prompt = int(getattr(request, "num_prompt_tokens", 0) or 0)
+    if not num_prompt:
+        prompt_ids = getattr(request, "prompt_token_ids", None)
+        num_prompt = len(prompt_ids) if prompt_ids else 0
 
-    # 2. try a cumulative text attribute on the request object.
-    for attr in ("output_text", "accumulated_text", "cumulative_text"):
-        val = getattr(request, attr, None)
-        if isinstance(val, str) and val:
-            return val
-    return ""
+    confirmed_fn = getattr(transfer_manager, "_confirmed_num_computed_tokens", None)
+    committed = (
+        confirmed_fn(request) if callable(confirmed_fn) else int(getattr(request, "num_computed_tokens", 0) or 0)
+    )
+    end = min(committed, len(all_token_ids)) if committed > num_prompt else len(all_token_ids)
+    return list(all_token_ids[num_prompt:end])
 
 
 def thinker2talker_async_chunk(
@@ -639,73 +634,38 @@ def thinker2talker_async_chunk(
     request: Any,
     is_finished: bool = False,
 ) -> OmniPayloadStruct | None:
-    """Async-chunk producer: stream completed sentences thinker -> talker.
+    """Async-chunk producer: forward the thinker's committed output token ids.
 
-    Flush granularity is the *sentence*.
-    Sentence boundaries are append-only stable, and we flush
-    every completed sentence and hold the last one until a new terminator appears or the request finishes.
+    Stateless by design. Each step ships the *cumulative* committed output
+    token ids (the consumer keeps the latest) plus the request-static voice
+    metadata. All text logic (detokenization, sentence/segment boundaries, normalization)
+    lives in the talker. This keeps the producer in token space,
+    and lets the talker reuse the exact segmenter the sync path uses.
     """
-    request_id = getattr(request, "external_req_id", None) or getattr(request, "request_id", None)
+    # ming thinker emits no worker tensor payload
+    del pooling_output
     finished = bool(is_finished or (hasattr(request, "is_finished") and request.is_finished()))
+    request_id = getattr(request, "external_req_id", None) or getattr(request, "request_id", None)
 
-    text_buf = getattr(transfer_manager, "ming_text_buf", None)
-    if text_buf is None:
-        text_buf = {}
-        transfer_manager.ming_text_buf = text_buf
-    flushed_counts = getattr(transfer_manager, "ming_flushed_segments", None)
-    if flushed_counts is None:
-        flushed_counts = {}
-        transfer_manager.ming_flushed_segments = flushed_counts
-
-    cumulative_text = _extract_incremental_thinker_text(pooling_output, request)
-    if cumulative_text:
-        # Producer emits cumulative text; keep the longest seen (monotonic).
-        if len(cumulative_text) >= len(text_buf.get(request_id, "")):
-            text_buf[request_id] = cumulative_text
-
-    full_text = text_buf.get(request_id, "")
-
-    def _terminal_marker() -> OmniPayloadStruct:
-        return OmniPayloadStruct(meta=MetaStruct(finished=torch.tensor(True, dtype=torch.bool)))
-
-    def _drop_request_state() -> None:
-        # Reclaim per-request producer state once the request is finished.
-        text_buf.pop(request_id, None)
-        flushed_counts.pop(request_id, None)
-
-    if not full_text:
-        # On finish, emit a terminal marker so the consumer closes its stream
+    output_ids = _committed_output_ids(transfer_manager, request)
+    if not output_ids:
+        # On finish, emit a terminal marker so the consumer closes its stream.
         if finished:
-            _drop_request_state()
-            return _terminal_marker()
+            return OmniPayloadStruct(
+                request_id=request_id,
+                meta=MetaStruct(finished=torch.tensor(True, dtype=torch.bool)),
+            )
         return None
 
-    sentences = split_text_into_sentences(full_text)
-    already_flushed = flushed_counts.get(request_id, 0)
-    # The trailing sentence may still be growing; hold it while streaming.
-    ready = sentences if finished else sentences[:-1]
-    new_sentences = [s for s in ready[already_flushed:] if s and s.strip()]
-
-    if not new_sentences:
-        if finished:
-            _drop_request_state()
-            return _terminal_marker()
-        return None
-
-    flushed_counts[request_id] = len(ready)
-    new_text = " ".join(new_sentences)
-    additional_info = _request_additional_info_dict(request)
-    talker_info = _build_talker_info(new_text, additional_info)
-
-    payload = OmniPayloadStruct(
-        kv_metadata={"text": new_text, "additional_information": talker_info},
+    # Voice/speaker fields are request-static; the talker fills `text` from the
+    # streamed ids, so the carried text is left empty here.
+    talker_info = _build_talker_info("", _request_additional_info_dict(request))
+    return OmniPayloadStruct(
+        request_id=request_id,
+        ids=IdsStruct(output=output_ids),
+        kv_metadata={"additional_information": talker_info},
         meta=MetaStruct(finished=torch.tensor(bool(finished), dtype=torch.bool)),
     )
-    if finished:
-        # terminal flush carried real data; reclaim state after building it.
-        _drop_request_state()
-
-    return payload
 
 
 def thinker2talker_full_payload(
