@@ -7,14 +7,17 @@ from __future__ import annotations
 import logging
 import re
 from dataclasses import dataclass
-from typing import Any
+from typing import TYPE_CHECKING, Any
 
 import torch
 from vllm.inputs import TextPrompt
 
 from vllm_omni.data_entry_keys import IdsStruct, MetaStruct, OmniPayloadStruct
-from vllm_omni.engine import OmniEngineCoreRequest
 from vllm_omni.inputs.data import OmniTokensPrompt
+
+if TYPE_CHECKING:
+    from vllm_omni.distributed.omni_connectors.transfer_adapter.chunk_transfer_adapter import OmniChunkTransferAdapter
+    from vllm_omni.request import OmniRequest
 
 logger = logging.getLogger(__name__)
 
@@ -514,7 +517,7 @@ def thinker2talker_token_only(
 thinker2talker_token_only._is_sync_input = True
 
 
-def _request_additional_info_dict(request: Any) -> dict[str, Any]:
+def _request_additional_info_dict(request: OmniRequest) -> dict[str, Any]:
     """Extract request's additional information as a dict."""
     info = getattr(request, "additional_information", None)
     if isinstance(info, dict):
@@ -533,7 +536,7 @@ def _request_additional_info_dict(request: Any) -> dict[str, Any]:
     return {}
 
 
-def _committed_output_ids(transfer_manager: Any, request: OmniEngineCoreRequest) -> list[int]:
+def _committed_output_ids(transfer_manager: OmniChunkTransferAdapter, request: OmniRequest) -> list[int]:
     """Return the thinker's *committed* output token ids produced so far."""
     # TODO: revise
     all_token_ids = getattr(request, "all_token_ids", None) or getattr(request, "_all_token_ids", None)
@@ -547,16 +550,16 @@ def _committed_output_ids(transfer_manager: Any, request: OmniEngineCoreRequest)
 
     confirmed_fn = getattr(transfer_manager, "_confirmed_num_computed_tokens", None)
     committed = (
-        confirmed_fn(request) if callable(confirmed_fn) else int(getattr(request, "num_computed_tokens", 0) or 0)
+        int(confirmed_fn(request)) if callable(confirmed_fn) else int(getattr(request, "num_computed_tokens", 0) or 0)
     )
     end = min(committed, len(all_token_ids)) if committed > num_prompt else len(all_token_ids)
     return list(all_token_ids[num_prompt:end])
 
 
 def thinker2talker_async_chunk(
-    transfer_manager: Any,
-    pooling_output: Any | None,
-    request: Any,
+    transfer_manager: OmniChunkTransferAdapter,
+    pooling_output: dict | None,
+    request: OmniRequest,
     is_finished: bool = False,
 ) -> OmniPayloadStruct | None:
     """Async-chunk producer: forward the thinker's committed output token ids.
