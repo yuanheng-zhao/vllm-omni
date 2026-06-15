@@ -182,6 +182,11 @@ class MingFlashOmniTalkerForConditionalGeneration(nn.Module, CustomProcessMixin)
         logger.debug("Falling back to raw model_path tokenizer resolution")
         return AutoTokenizer.from_pretrained(self._model_path, trust_remote_code=True)
 
+    @cached_property
+    def thinker_tokenizer(self):
+        """Root (thinker) tokenizer — async-chunk path only"""
+        return AutoTokenizer.from_pretrained(self._model_path, trust_remote_code=True)
+
     @staticmethod
     def _resolve_talker_config(config, talker_dir: str, model_path: str) -> MingFlashOmniTalkerConfig:
         """Resolve MingFlashOmniTalkerConfig when the root config is not one.
@@ -386,7 +391,7 @@ class MingFlashOmniTalkerForConditionalGeneration(nn.Module, CustomProcessMixin)
 
         req_id = info.get("request_id") or "default"
         finished = self._payload_finished(info)
-        cumulative_text = self.tokenizer.decode(output_ids, skip_special_tokens=True)
+        cumulative_text = self.thinker_tokenizer.decode(output_ids, skip_special_tokens=True)
         # NOTE: Boundary parity: Cut segments in a greedy left-to-right way,
         # so running it on the cumulative text and emitting all-but-the-last
         # segment yields the same fragments the sync path produces on the full text;
