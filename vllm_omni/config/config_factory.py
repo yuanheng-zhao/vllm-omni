@@ -83,10 +83,6 @@ class StageConfigFactory:
                     deploy_config_path,
                 )
 
-        print(" >>> create_from_model: ")
-        print(f"    >>> model_type: {type(model_type)}, {model_type}")
-        print(f"    >>> hf_config: {type(hf_config)}, {hf_config}")
-
         # --- HF architecture fallback: some models report a generic
         # model_type that collides with another model. Match by the
         # hf_architectures declared on each registered PipelineConfig.
@@ -127,6 +123,7 @@ class StageConfigFactory:
                             cli_overrides,
                             deploy_config_path,
                         )
+
         # --- Explicit deploy-config pipeline ---
         # When auto-detection above resolves nothing (generic/missing HF model_type
         # and no matching architecture), honor an explicit pipeline key in the deploy config
