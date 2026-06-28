@@ -440,6 +440,42 @@ def thinker2imagegen(
     return [{"prompt": "", "extra": extra}]
 
 
+def _build_talker_info(text: str, additional_info: dict[str, Any]) -> dict[str, Any]:
+    """Build the talker's per-request metadata dict from thinker-side additional_information.
+
+    Single source of truth shared by the sync builder and the async-chunk producer.
+    The async path passes an empty text and the talker fills it by detokenizing the
+    streamed thinker token ids.
+
+    Omni speech path mirrors upstream omni_audio_generation:
+    - `prompt` is hardcoded, `instruction` is forced to None, and
+      cfg/sigma/temperature inherit the `tts_job` defaults (the upstream API
+      does NOT expose these knobs). The talker `forward()` enforces the
+      per-task defaults from `ming_task="omni"` so any stray caller overrides
+      are ignored.
+    - Voice cloning is preset-only via `voice_name` (default 'DB30'); when no
+      preset/spk_emb resolves the talker passes `spk_emb=None` through rather
+      than substituting a zero vector. Presets are resolved by `voice_name` in
+      the talker's `forward()` from its registered_prompts cache.
+    """
+    # spk_emb can arrive serialised as a plain list from JSON requests;
+    # the talker's spk_head wants a torch tensor.
+    spk_emb = additional_info.get("spk_emb", None)
+    if isinstance(spk_emb, list) and spk_emb and not hasattr(spk_emb[0], "device"):
+        spk_emb = torch.tensor(spk_emb, dtype=torch.float32).unsqueeze(0)
+
+    return {
+        "ming_task": "omni",
+        "text": text,
+        "spk_emb": spk_emb,
+        "voice_name": additional_info.get("voice_name", "DB30"),
+        "prompt_text": additional_info.get("prompt_text", None),
+        "prompt_wav_lat": additional_info.get("prompt_wav_lat", None),
+        "prompt_wav_emb": additional_info.get("prompt_wav_emb", None),
+        "max_text_length": additional_info.get("max_text_length", 50),
+    }
+
+
 def _build_talker_inputs(
     source_outputs: list[Any],
     prompt: OmniTokensPrompt | TextPrompt | None = None,
@@ -460,37 +496,7 @@ def _build_talker_inputs(
         if original_prompt is not None and hasattr(original_prompt, "additional_information"):
             additional_info = original_prompt.additional_information or {}
 
-        # spk_emb can arrive serialised as a plain list from JSON requests;
-        # the talker's spk_head wants a torch tensor.
-        spk_emb = additional_info.get("spk_emb", None)
-        if isinstance(spk_emb, list) and spk_emb and not hasattr(spk_emb[0], "device"):
-            spk_emb = torch.tensor(spk_emb, dtype=torch.float32).unsqueeze(0)
-
-        # Omni speech path mirrors upstream `omni_audio_generation`:
-        # - `prompt` is hardcoded, `instruction` is forced to None,
-        #   cfg/sigma/temperature inherit the `tts_job` defaults (the
-        #   upstream API does NOT expose these knobs).
-        # - Voice cloning is preset-only via `voice_name` (default
-        #   'DB30'); `get_prompt_emb` is called with
-        #   `use_spk_emb=True, use_zero_spk_emb=False`, so when no
-        #   preset resolves upstream simply passes `spk_emb=None`
-        #   through to `tts_job` rather than substituting a zero
-        #   vector.
-        # The bridge only plumbs the request-specific fields; the
-        # talker `forward()` enforces the per-task defaults from
-        # `ming_task="omni"` so any stray caller overrides are ignored.
-        # Voice presets are resolved by voice_name in the talker's
-        # forward() from its registered_prompts cache.
-        talker_info = {
-            "ming_task": "omni",
-            "text": generated_text,
-            "spk_emb": spk_emb,
-            "voice_name": additional_info.get("voice_name", "DB30"),
-            "prompt_text": additional_info.get("prompt_text", None),
-            "prompt_wav_lat": additional_info.get("prompt_wav_lat", None),
-            "prompt_wav_emb": additional_info.get("prompt_wav_emb", None),
-            "max_text_length": additional_info.get("max_text_length", 50),
-        }
+        talker_info = _build_talker_info(generated_text, additional_info)
 
         # Use dummy token IDs (talker builds its own embeddings from text)
         talker_inputs.append(
