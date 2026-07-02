@@ -69,7 +69,16 @@ def parse_args() -> argparse.Namespace:
         "--stage-configs-path",
         type=str,
         default=None,
-        help="Path to a YAML file containing stage configurations for Omni.",
+        help="[Deprecated] Path to a legacy stage_args-format YAML. Prefer --deploy-config.",
+    )
+    parser.add_argument(
+        "--deploy-config",
+        type=str,
+        default=None,
+        help=(
+            "Path to a deploy YAML (new pipeline/stages format). Required for multi-stage "
+            "text-to-image pipelines whose deploy config is not auto-loaded."
+        ),
     )
     parser.add_argument("--prompt", default="a cup of coffee on the table", help="Text prompt for image generation.")
     parser.add_argument(
@@ -427,6 +436,8 @@ def main():
     }
     if args.stage_configs_path:
         omni_kwargs["stage_configs_path"] = args.stage_configs_path
+    if args.deploy_config:
+        omni_kwargs["deploy_config"] = args.deploy_config
     if use_nextstep:
         # NextStep-1.1 requires explicit pipeline class
         omni_kwargs["model_class_name"] = "NextStep11Pipeline"

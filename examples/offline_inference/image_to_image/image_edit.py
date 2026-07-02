@@ -139,6 +139,15 @@ def parse_args() -> argparse.Namespace:
         help="Path(s) to input image file(s) (PNG, JPG, etc.). Can specify multiple images.",
     )
     parser.add_argument(
+        "--deploy-config",
+        type=str,
+        default=None,
+        help=(
+            "Path to a deploy YAML. Required for multi-stage image-edit pipelines "
+            "whose deploy config is not auto-loaded."
+        ),
+    )
+    parser.add_argument(
         "--prompt",
         type=str,
         required=True,
@@ -468,7 +477,7 @@ def main():
         }
 
     # Initialize Omni with appropriate pipeline
-    omni = Omni(
+    omni_kwargs: dict[str, Any] = dict(
         model=args.model,
         enable_layerwise_offload=args.enable_layerwise_offload,
         vae_use_slicing=args.vae_use_slicing,
@@ -481,6 +490,9 @@ def main():
         enable_diffusion_pipeline_profiler=args.enable_diffusion_pipeline_profiler,
         profiler_config=args.profiler_config,
     )
+    if args.deploy_config:
+        omni_kwargs["deploy_config"] = args.deploy_config
+    omni = Omni(**omni_kwargs)
     model_class_name = get_model_class_name(omni)
     declared_extra_body_params = get_extra_body_params(model_class_name)
     print("Pipeline loaded")
