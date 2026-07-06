@@ -168,22 +168,20 @@ Add an `image_url` content part (a base64 data URL) to the user message; it is r
 # Check https://github.com/inclusionAI/Ming/blob/3954fcb880ff5e61ff128bcf7f1ec344d46a6fe3/examples/vllm_demo.py
 wget https://raw.githubusercontent.com/inclusionAI/Ming/3954fcb880ff5e61ff128bcf7f1ec344d46a6fe3/figures/cases/person_gen_05.png
 
-# Encode the reference image, build the body with jq, and stream it to curl via
-# stdin (`-d @-`) so the large base64 string never hits the shell ARG_MAX limit.
-B64=$(base64 -w0 person_gen_05.png)
-jq -n --arg b64 "$B64" '{
-  model: "Jonathan1909/Ming-flash-omni-2.0",
-  modalities: ["image"],
-  messages: [
-    {
-      role: "user",
-      content: [
-        { type: "text", text: "Put a pair of sunglasses on the person." },
-        { type: "image_url", image_url: { url: ("data:image/png;base64," + $b64) } }
-      ]
-    }
-  ]
-}' \
+base64 -w0 person_gen_05.png \
+| jq -Rs --arg prompt "Put a pair of sunglasses on the person." '{
+    model: "Jonathan1909/Ming-flash-omni-2.0",
+    modalities: ["image"],
+    messages: [
+      {
+        role: "user",
+        content: [
+          { type: "text", text: $prompt },
+          { type: "image_url", image_url: { url: ("data:image/png;base64," + (. | rtrimstr("\n"))) } }
+        ]
+      }
+    ]
+  }' \
 | curl http://127.0.0.1:8091/v1/chat/completions \
     -H "Content-Type: application/json" \
     -d @- \
