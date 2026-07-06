@@ -107,13 +107,16 @@ python examples/offline_inference/text_to_image/text_to_image.py \
 ```
 
 Image-to-image (offline):
-
 ```bash
+# Reference image: figures/cases/person_gen_05.png from the upstream Ming repo
+# https://github.com/inclusionAI/Ming/blob/3954fcb880ff5e61ff128bcf7f1ec344d46a6fe3/examples/vllm_demo.py
+wget https://raw.githubusercontent.com/inclusionAI/Ming/3954fcb880ff5e61ff128bcf7f1ec344d46a6fe3/figures/cases/person_gen_05.png
+
 python examples/offline_inference/image_to_image/image_edit.py \
     --model Jonathan1909/Ming-flash-omni-2.0 \
     --deploy-config vllm_omni/deploy/ming_flash_omni_image.yaml \
-    --image input.png \
-    --prompt "Change the background to a sandy beach at sunset." \
+    --image person_gen_05.png \
+    --prompt "Put a pair of sunglasses on the person." \
     --extra-args '{"steps": 30, "cfg": 2.0, "seed": 42}' \
     --output ming_flash_omni_i2i.png
 ```

@@ -161,38 +161,34 @@ curl http://127.0.0.1:8091/v1/chat/completions \
 
 ### img2img (reference image)
 
-Add an `image_url` content part (a base64 data URL) to the user message; it is
-routed into the DiT stage as `extra[reference_image]`. Following the standard
-[image-to-image example](../image_to_image/README.md), base64-encode a local
-file and stream it through `jq` via stdin — piping `base64 → jq → curl` avoids
-the shell `ARG_MAX` limit that inlining a large base64 string in `-d '…'` hits:
+Add an `image_url` content part (a base64 data URL) to the user message; it is routed into the DiT stage as `extra[reference_image]`. base64-encode a local file and stream it through `jq` via stdin - piping `base64 -> jq -> curl` so that avoids the shell `ARG_MAX` limit that inlining a large base64 string in `-d '…'` hits.
 
 ```bash
-curl http://127.0.0.1:8091/v1/chat/completions \
-  -H "Content-Type: application/json" \
-  -d '{
-    "model": "Jonathan1909/Ming-flash-omni-2.0",
-    "modalities": ["image"],
-    "messages": [
-      {
-        "role": "user",
-        "content": [
-          {
-            "type": "text",
-            "text": "Change the background to a sandy beach at sunset."
-          },
-          {
-            "type": "image_url",
-            "image_url": {
-              "url": "data:image/png;base64,<BASE64>"
-            }
-          }
-        ]
-      }
-    ]
-  }' \
-  | jq -r '.choices[0].message.content[0].image_url.url | split(",")[1]' \
-  | base64 -d > ming_img2img.png
+# Reference image: figures/cases/person_gen_05.png from the upstream Ming repo
+# Check https://github.com/inclusionAI/Ming/blob/3954fcb880ff5e61ff128bcf7f1ec344d46a6fe3/examples/vllm_demo.py
+wget https://raw.githubusercontent.com/inclusionAI/Ming/3954fcb880ff5e61ff128bcf7f1ec344d46a6fe3/figures/cases/person_gen_05.png
+
+# Encode the reference image, build the body with jq, and stream it to curl via
+# stdin (`-d @-`) so the large base64 string never hits the shell ARG_MAX limit.
+B64=$(base64 -w0 person_gen_05.png)
+jq -n --arg b64 "$B64" '{
+  model: "Jonathan1909/Ming-flash-omni-2.0",
+  modalities: ["image"],
+  messages: [
+    {
+      role: "user",
+      content: [
+        { type: "text", text: "Put a pair of sunglasses on the person." },
+        { type: "image_url", image_url: { url: ("data:image/png;base64," + $b64) } }
+      ]
+    }
+  ]
+}' \
+| curl http://127.0.0.1:8091/v1/chat/completions \
+    -H "Content-Type: application/json" \
+    -d @- \
+| jq -r '.choices[0].message.content[0].image_url.url | split(",")[1]' \
+| base64 -d > ming_img2img.png
 ```
 
 The reference image can also be a public URL (`"url": "https://…/photo.jpg"`) or the simplified `{"image": "<base64>"}` content-part form — see the [image-to-image request formats](../image_to_image/README.md#request-format).
