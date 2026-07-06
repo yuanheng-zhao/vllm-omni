@@ -358,7 +358,12 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument(
         "--enforce-eager",
         action="store_true",
-        help="Disable torch.compile and force eager execution.",
+        default=None,
+        help=(
+            "Disable torch.compile and force eager execution. Left unset (None) "
+            "so it is only forwarded when explicitly given; "
+            "otherwise the per-stage deploy YAML value wins."
+        ),
     )
     parser.add_argument(
         "--vae-use-slicing",
@@ -485,11 +490,12 @@ def main():
         cache_backend=args.cache_backend,
         cache_config=cache_config,
         parallel_config=parallel_config,
-        enforce_eager=args.enforce_eager,
         enable_cpu_offload=args.enable_cpu_offload,
         enable_diffusion_pipeline_profiler=args.enable_diffusion_pipeline_profiler,
         profiler_config=args.profiler_config,
     )
+    if args.enforce_eager is not None:
+        omni_kwargs["enforce_eager"] = args.enforce_eager
     if args.deploy_config:
         omni_kwargs["deploy_config"] = args.deploy_config
     omni = Omni(**omni_kwargs)

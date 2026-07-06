@@ -164,7 +164,12 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument(
         "--enforce-eager",
         action="store_true",
-        help="Disable torch.compile and force eager execution.",
+        default=None,
+        help=(
+            "Disable torch.compile and force eager execution. Left unset (None) "
+            "so it is only forwarded when explicitly given; "
+            "otherwise the per-stage deploy YAML value wins."
+        ),
     )
     parser.add_argument(
         "--enable-cpu-offload",
@@ -230,8 +235,13 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument(
         "--tensor-parallel-size",
         type=int,
-        default=1,
-        help="Number of GPUs used for tensor parallelism (TP) inside the DiT.",
+        default=None,
+        help=(
+            "Number of GPUs used for tensor parallelism (TP) inside the DiT. "
+            "Left unset so it is only forwarded when explicitly given; "
+            "otherwise the per-stage deploy YAML (or engine default of 1) wins. "
+            "Passing it always overrides the deploy YAML."
+        ),
     )
     parser.add_argument(
         "--enable-expert-parallel",
@@ -419,10 +429,8 @@ def main():
         "ring_degree": args.ring_degree,
         "ulysses_mode": args.ulysses_mode,
         "cfg_parallel_size": args.cfg_parallel_size,
-        "tensor_parallel_size": args.tensor_parallel_size,
         "vae_patch_parallel_size": args.vae_patch_parallel_size,
         "enable_expert_parallel": args.enable_expert_parallel,
-        "enforce_eager": args.enforce_eager,
         "enable_cpu_offload": args.enable_cpu_offload,
         "mode": "text-to-image",
         "log_stats": args.log_stats,
@@ -434,6 +442,10 @@ def main():
         **lora_args,
         **quant_kwargs,
     }
+    if args.tensor_parallel_size is not None:
+        omni_kwargs["tensor_parallel_size"] = args.tensor_parallel_size
+    if args.enforce_eager is not None:
+        omni_kwargs["enforce_eager"] = args.enforce_eager
     if args.stage_configs_path:
         omni_kwargs["stage_configs_path"] = args.stage_configs_path
     if args.deploy_config:
@@ -462,8 +474,9 @@ def main():
     print(f"  Quantization: {args.quantization if args.quantization else 'None (BF16)'}")
     if ignored_layers:
         print(f"  Ignored layers: {ignored_layers}")
+    tp_display = args.tensor_parallel_size if args.tensor_parallel_size is not None else "deploy/default"
     print(
-        f"  Parallel configuration: tensor_parallel_size={args.tensor_parallel_size}, "
+        f"  Parallel configuration: tensor_parallel_size={tp_display}, "
         f"ulysses_degree={args.ulysses_degree}, ulysses_mode={args.ulysses_mode}, "
         f"ring_degree={args.ring_degree}, cfg_parallel_size={args.cfg_parallel_size}, "
         f"vae_patch_parallel_size={args.vae_patch_parallel_size}, "
