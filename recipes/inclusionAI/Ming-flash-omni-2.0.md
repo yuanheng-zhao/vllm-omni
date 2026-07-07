@@ -227,13 +227,9 @@ curl http://127.0.0.1:8091/v1/chat/completions \
   | base64 -d > ming_imagegen_extra_body.png
 ```
 
-**Full control — `sampling_params_list`** (one entry per stage:
-`[thinker, imagegen]`). Use this when you need to tune the thinker's own
-sampling (`temperature` / `top_p` / `top_k` / `max_tokens`), or to place knobs
-explicitly per stage. Note `negative_prompt` must sit on the **stage-0 thinker**
-`extra_args` — that is what triggers `expand_cfg_prompts` to spawn the real-CFG
-companion; the imagegen-stage knobs (`steps` / `cfg` / `height` / `width` /
-`seed` / `byte5_text`) go on the **stage-1** entry:
+**Full control — `sampling_params_list`** (one entry per stage: `[thinker, imagegen]`).
+Use this when you need to tune the thinker's own sampling (`temperature` / `top_p` / `top_k` / `max_tokens`), or to place knobs explicitly per stage.
+Note `negative_prompt` must sit on the **stage-0 thinker** `extra_args`; the imagegen-stage knobs (`steps` / `cfg` / `height` / `width` / `seed` / `byte5_text`) go on the **stage-1** entry:
 
 ```bash
 curl http://127.0.0.1:8091/v1/chat/completions \
