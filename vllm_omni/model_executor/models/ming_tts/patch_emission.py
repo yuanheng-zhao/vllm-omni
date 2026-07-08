@@ -147,6 +147,7 @@ def _resolve_ming_stop_decision(
     max_decode_steps: int,
     audio_dummy_token_id: int,
     text_eos_token_id: int,
+    stop_head_armed: bool = True,
 ) -> tuple[str, bool, bool, int, int]:
     min_required_decode_steps = max(min_stop_step + 2, min_decode_steps)
     if max_decode_steps < min_required_decode_steps:
@@ -156,7 +157,9 @@ def _resolve_ming_stop_decision(
             f"min_required_decode_steps={min_required_decode_steps}"
         )
     should_force_stop = (step + 1) >= max_decode_steps
-    should_stop_head = ((step + 1) >= min_required_decode_steps) and stop_prob > stop_threshold
+    # stop_head_armed gates the stop head until the target is underway (see KEY_STOP_ARMED),
+    # avoiding a premature stop on the high stop_prob of the leading reference-prefill region.
+    should_stop_head = stop_head_armed and ((step + 1) >= min_required_decode_steps) and stop_prob > stop_threshold
 
     if should_force_stop:
         return (

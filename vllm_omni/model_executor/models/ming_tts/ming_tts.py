@@ -33,7 +33,9 @@ from .config_ming_tts import (
     KEY_NEXT_EMBEDS,
     KEY_REQUEST_ID,
     KEY_SIGMA,
+    KEY_SKIP_OUTPUT_PATCHES,
     KEY_SPEAKER_EMBEDDING,
+    KEY_STOP_ARMED,
     KEY_TEMPERATURE,
     KEY_TEXT_MODE,
     MingTTSConfig,
@@ -146,6 +148,8 @@ class MingTTSForConditionalGeneration(nn.Module, SupportsPP, CustomProcessMixin)
         stop_prob = _take_scalar(pending.get("ming_stop_prob"), 0)
         if stop_prob is not None:
             update[KEY_LAST_STOP_PROB] = stop_prob
+        # Round-trip the stop-head arm latch to the next decode step (see KEY_STOP_ARMED).
+        update[KEY_STOP_ARMED] = bool(pending.get(KEY_STOP_ARMED, False))
         stop_reason = pending.get(MING_STOP_REASON_KEY)
         if isinstance(stop_reason, str):
             update[MING_STOP_REASON_KEY] = stop_reason
@@ -251,7 +255,16 @@ class MingTTSForConditionalGeneration(nn.Module, SupportsPP, CustomProcessMixin)
 
 
 def _copy_runtime_controls(update: dict[str, Any], info_dict: dict[str, Any]) -> None:
-    for key in (KEY_CFG, KEY_SIGMA, KEY_TEMPERATURE, KEY_MAX_DECODE_STEPS, KEY_MIN_DECODE_STEPS):
+    # Thread per-request controls to every decode step's req_info. KEY_SKIP_OUTPUT_PATCHES
+    # and KEY_MIN_DECODE_STEPS must be here or MingLLMModel.forward reads their defaults.
+    for key in (
+        KEY_CFG,
+        KEY_SIGMA,
+        KEY_TEMPERATURE,
+        KEY_MAX_DECODE_STEPS,
+        KEY_MIN_DECODE_STEPS,
+        KEY_SKIP_OUTPUT_PATCHES,
+    ):
         if key in info_dict:
             update[key] = info_dict[key]
 

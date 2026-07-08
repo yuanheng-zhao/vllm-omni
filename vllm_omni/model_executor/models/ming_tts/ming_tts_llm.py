@@ -29,6 +29,8 @@ from .config_ming_tts import (
     KEY_NEXT_EMBEDS,
     KEY_REQUEST_ID,
     KEY_SIGMA,
+    KEY_SKIP_OUTPUT_PATCHES,
+    KEY_STOP_ARMED,
     KEY_TEMPERATURE,
     KEY_TEXT_MODE,
     MingTTSConfig,
@@ -205,6 +207,9 @@ class MingLLMModel(nn.Module):
                 req_info, KEY_MAX_DECODE_STEPS, self.ming_config.max_decode_steps
             )
             req_min_decode_steps = _resolve_optional_runtime_int(req_info, KEY_MIN_DECODE_STEPS, 0)
+            # Leading generated patches that re-render the reference (ICL) region and must
+            # be withheld from the output waveform (see the has_patch gate below).
+            req_skip_output_patches = _resolve_optional_runtime_int(req_info, KEY_SKIP_OUTPUT_PATCHES, 0)
             if latent_patch_tokens is None:
                 latent_patch_tokens = sampled_token_latent.new_zeros(
                     (total_tokens, self.ming_config.patch_size, self.ming_config.latent_dim)
@@ -220,16 +225,34 @@ class MingLLMModel(nn.Module):
             next_embed_tokens[output_index : output_index + 1] = next_embeds
             new_history_tokens[output_index : output_index + 1] = new_history
             decode_step_tokens[output_index : output_index + 1] = decode_step
-            has_patch[output_index : output_index + 1] = True
+            stop_prob_value = float(stop_probs.reshape(-1)[0].item())
+            stop_threshold = float(self.ming_config.stop_head_threshold)
+            # Reference cloning (skip > 0): the leading reference-prefill region is silence
+            # with a HIGH stop_prob; speech begins when stop_prob first dips below threshold.
+            # Latch armed there (floored at skip) to drive BOTH emission
+            #   - drop the leading silence at the onset, any length
+            #   - and the stop head (fire only once the target is underway)
+            # Non-clone requests (skip == 0) emit from step 0 with the stop head unrestricted.
+            # The latch round-trips across steps via postprocess (like history).
+            stop_armed = bool(req_info.get(KEY_STOP_ARMED, False))
+            if req_skip_output_patches > 0:
+                if not stop_armed and decode_step >= req_skip_output_patches and stop_prob_value < stop_threshold:
+                    stop_armed = True
+                emit_patch = stop_armed
+            else:
+                stop_armed = True
+                emit_patch = True
+            has_patch[output_index : output_index + 1] = emit_patch
             stop_reason, _, _, _, next_token_id = _resolve_ming_stop_decision(
                 step=decode_step,
-                stop_prob=float(stop_probs.reshape(-1)[0].item()),
-                stop_threshold=float(self.ming_config.stop_head_threshold),
+                stop_prob=stop_prob_value,
+                stop_threshold=stop_threshold,
                 min_stop_step=int(self.ming_config.stop_head_min_steps),
                 min_decode_steps=req_min_decode_steps,
                 max_decode_steps=req_max_decode_steps,
                 audio_dummy_token_id=int(self.ming_config.audio_dummy_token_id),
                 text_eos_token_id=int(self.ming_config.text_eos_token_id),
+                stop_head_armed=stop_armed,
             )
             stop_reason_code_tokens[output_index : output_index + 1] = MING_STOP_REASON_CODES[stop_reason]
             next_token_ids.append(int(next_token_id))
@@ -237,6 +260,7 @@ class MingLLMModel(nn.Module):
                 pending_updates[req_id] = {
                     KEY_LATENT_HISTORY: new_history,
                     KEY_NEXT_EMBEDS: next_embeds,
+                    KEY_STOP_ARMED: stop_armed,
                     "ming_latent_patch": sampled_token_latent,
                     "ming_stop_prob": stop_probs,
                     MING_STOP_REASON_KEY: stop_reason,
