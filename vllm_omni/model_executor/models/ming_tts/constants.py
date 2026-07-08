@@ -82,3 +82,6 @@ KEY_TEMPERATURE = "ming_temperature"
 KEY_MAX_DECODE_STEPS = "ming_max_decode_steps"
 KEY_MIN_DECODE_STEPS = "ming_min_decode_steps"
 KEY_TEXT_MODE = "ming_text_mode"
+
+KEY_SKIP_OUTPUT_PATCHES = "ming_skip_output_patches"
+KEY_STOP_ARMED = "ming_stop_armed"

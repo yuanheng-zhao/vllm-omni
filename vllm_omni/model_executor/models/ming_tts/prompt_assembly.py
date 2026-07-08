@@ -22,6 +22,7 @@ from .config_ming_tts import (
     KEY_MIN_DECODE_STEPS,
     KEY_PROMPT_LATENTS,
     KEY_REQUEST_ID,
+    KEY_SKIP_OUTPUT_PATCHES,
     KEY_SPEAKER_EMBEDDING,
     LATENT_DIM,
     PATCH_SIZE,
@@ -298,13 +299,27 @@ def build_ming_dense_prompt(
             prompt_latent_value, patch_size=PATCH_SIZE, latent_dim=LATENT_DIM
         )
 
+    # NOTE: the reference audio clones the voice but keeping ref_text out of the spoken text
+    # avoids the upstream ICL ref re-render, giving target-only output.
+    # The reference-audio prefill still emits ~prompt_patch_count leading silence patches,
+    # while two controls trim them:
+    #   1) KEY_MIN_DECODE_STEPS holds the stop head off past that region,
+    #   2) and KEY_SKIP_OUTPUT_PATCHES floors the emission arm latch.
+    if prompt_patch_count > 0:
+        prior_min = effective_runtime_controls.get(KEY_MIN_DECODE_STEPS)
+        ref_min_decode_steps = prompt_patch_count + 1
+        effective_runtime_controls[KEY_MIN_DECODE_STEPS] = (
+            max(int(prior_min), ref_min_decode_steps) if prior_min is not None else ref_min_decode_steps
+        )
+
     prompt_token_ids = build_prompt_token_ids(
         model_variant,
         tokenizer,
         prompt=prompt,
         text=text,
         instruction=instruction_text,
-        prompt_text=prompt_text if prompt_patch_count > 0 else None,
+        # ref_text is reference-alignment context only; never placed in the spoken text.
+        prompt_text=None,
         speaker_count=0 if speaker_embeddings is None else len(speaker_embeddings),
         prompt_patch_count=prompt_patch_count,
     )
@@ -317,6 +332,10 @@ def build_ming_dense_prompt(
             additional_information[key] = torch.tensor(int(value), dtype=torch.int32)
         else:
             additional_information[key] = torch.tensor(float(value), dtype=torch.float32)
+    if prompt_patch_count > 0:
+        # Floor for the emission arm latch: the leading ~prompt_patch_count silence patches
+        # from the reference-audio prefill are never emitted before the speech onset.
+        additional_information[KEY_SKIP_OUTPUT_PATCHES] = int(prompt_patch_count)
     if request_id is not None:
         additional_information[KEY_REQUEST_ID] = request_id
     if instruction_text is not None:
